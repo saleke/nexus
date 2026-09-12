@@ -41,7 +41,17 @@ services:
 
   worker:
     build: .
-    command: celery -A post_clustering_pipeline.queues.celery_app worker --loglevel=INFO
+    command: celery -A post_clustering_pipeline.queues.celery_app worker --loglevel=INFO --pool=threads --concurrency=4
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  beat:
+    build: .
+    command: celery -A post_clustering_pipeline.queues.celery_app beat --loglevel=INFO
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
       REDIS_URL: redis://redis:6379/0

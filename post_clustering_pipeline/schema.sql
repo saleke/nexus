@@ -4,6 +4,12 @@ CREATE TABLE event_hubs (
     id SERIAL PRIMARY KEY,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    member_count INT NOT NULL DEFAULT 1,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
+    discourse_type VARCHAR(50) NOT NULL DEFAULT 'event',
+    anchor_post_id INT,
+    merged_into_id INT REFERENCES event_hubs(id) ON DELETE SET NULL,
     centroid vector(384)
 );
 
@@ -52,11 +58,14 @@ CREATE TABLE system_config (
     value NUMERIC(4,3) NOT NULL
 );
 
-INSERT INTO system_config (key, value) VALUES ('global_similarity_threshold', 0.860);
+INSERT INTO system_config (key, value) VALUES ('global_similarity_threshold', 0.880);
 
 CREATE INDEX ON posts USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_event_hubs_last_updated ON event_hubs(last_updated_at DESC);
 CREATE INDEX idx_posts_event_timeline ON posts(event_id, created_at ASC);
+CREATE INDEX idx_posts_active_event_timeline
+ON posts(event_id, created_at ASC, id ASC)
+WHERE deleted_at IS NULL;
 CREATE INDEX idx_posts_event_engagement ON posts(event_id, engagement_score DESC);
 CREATE INDEX idx_posts_assignment_status ON posts(assignment_status, assignment_updated_at DESC);
 CREATE UNIQUE INDEX uq_posts_source_external_id ON posts(source_id, external_post_id) WHERE external_post_id IS NOT NULL;
@@ -93,5 +102,10 @@ CREATE TABLE integration_outbox (
 );
 CREATE INDEX idx_outbox_pending ON integration_outbox(delivery_status, available_at, id);
 CREATE INDEX idx_outbox_lease ON integration_outbox(lease_until, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_outbox_post_event_type ON integration_outbox(post_id, event_type) WHERE post_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_processing_sweeper ON posts(assignment_status, assignment_updated_at) WHERE assignment_status = 'processing';
+CREATE INDEX IF NOT EXISTS idx_event_hubs_redirect ON event_hubs(id, merged_into_id) WHERE is_active = FALSE;
 
-CREATE INDEX ON event_hubs USING hnsw (centroid vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_active_event_hubs_hnsw 
+ON event_hubs USING hnsw (centroid vector_cosine_ops) 
+WHERE is_active = TRUE AND centroid IS NOT NULL;

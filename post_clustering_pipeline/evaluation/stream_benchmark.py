@@ -8,7 +8,7 @@ from collections import Counter
 
 import requests
 
-from .db import get_db_connection
+from ..db import get_db_connection
 from .batch_benchmark import build_posts
 from ..jobs.event_birth import run_clustering_pipeline
 

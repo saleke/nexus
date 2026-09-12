@@ -3,38 +3,34 @@ from __future__ import annotations
 
 import argparse
 
-from ..db import get_db_connection
+from ..db import get_db_cursor
 
 
 def promote(model_version: str, adapter_path: str, precision: float, recall: float, noise_fp: float,
             min_precision: float, min_recall: float, max_noise_fp: float) -> str:
     if precision < min_precision or recall < min_recall or noise_fp > max_noise_fp:
         return "rejected: validation quality gates failed"
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT validation_precision, validation_recall, noise_false_positive_rate FROM model_registry WHERE status = 'active' ORDER BY promoted_at DESC LIMIT 1")
-            current = cur.fetchone()
-            if current:
-                current_precision = float(current["validation_precision"] or 0)
-                current_recall = float(current["validation_recall"] or 0)
-                current_noise = float(current["noise_false_positive_rate"] or 1)
-                if precision < current_precision and recall < current_recall:
-                    return "rejected: candidate is worse than active model"
-                if noise_fp > current_noise and precision <= current_precision:
-                    return "rejected: candidate increases noise errors without precision gain"
-            cur.execute("UPDATE model_registry SET status = 'retired' WHERE status = 'active'")
-            cur.execute("""INSERT INTO model_registry
-                (model_version, adapter_path, validation_precision, validation_recall,
-                 noise_false_positive_rate, status, promoted_at)
-                VALUES (%s, %s, %s, %s, %s, 'active', NOW())
-                ON CONFLICT (model_version) DO UPDATE SET adapter_path = EXCLUDED.adapter_path,
-                  validation_precision = EXCLUDED.validation_precision, validation_recall = EXCLUDED.validation_recall,
-                  noise_false_positive_rate = EXCLUDED.noise_false_positive_rate, status = 'active', promoted_at = NOW()
-            """, (model_version, adapter_path, precision, recall, noise_fp))
-        conn.commit()
-    finally:
-        conn.close()
+
+    with get_db_cursor(commit=True) as cur:
+        cur.execute("SELECT validation_precision, validation_recall, noise_false_positive_rate FROM model_registry WHERE status = 'active' ORDER BY promoted_at DESC LIMIT 1")
+        current = cur.fetchone()
+        if current:
+            current_precision = float((current["validation_precision"] if isinstance(current, dict) else current[0]) or 0)
+            current_recall = float((current["validation_recall"] if isinstance(current, dict) else current[1]) or 0)
+            current_noise = float((current["noise_false_positive_rate"] if isinstance(current, dict) else current[2]) or 1)
+            if precision < current_precision and recall < current_recall:
+                return "rejected: candidate is worse than active model"
+            if noise_fp > current_noise and precision <= current_precision:
+                return "rejected: candidate increases noise errors without precision gain"
+        cur.execute("UPDATE model_registry SET status = 'retired' WHERE status = 'active'")
+        cur.execute("""INSERT INTO model_registry
+            (model_version, adapter_path, validation_precision, validation_recall,
+             noise_false_positive_rate, status, promoted_at)
+            VALUES (%s, %s, %s, %s, %s, 'active', NOW())
+            ON CONFLICT (model_version) DO UPDATE SET adapter_path = EXCLUDED.adapter_path,
+              validation_precision = EXCLUDED.validation_precision, validation_recall = EXCLUDED.validation_recall,
+              noise_false_positive_rate = EXCLUDED.noise_false_positive_rate, status = 'active', promoted_at = NOW()
+        """, (model_version, adapter_path, precision, recall, noise_fp))
     return "promoted"
 
 

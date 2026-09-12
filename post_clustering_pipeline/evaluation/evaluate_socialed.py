@@ -2,12 +2,8 @@ import os
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
-try:
-    from ..jobs.event_birth import run_clustering_pipeline
-    from .db import get_db_connection
-except ImportError:
-    from ..jobs.event_birth import run_clustering_pipeline
-    from db import get_db_connection
+from ..jobs.event_birth import run_clustering_pipeline
+from ..db import get_db_connection
 
 # Simulated benchmark records representing real dataset distributions
 BENCHMARK_DATASET = [

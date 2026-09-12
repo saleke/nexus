@@ -1,7 +1,4 @@
-try:
-    from .db import get_db_connection
-except ImportError:
-    from db import get_db_connection
+from ..db import get_db_connection
 
 def inspect():
     conn = get_db_connection()

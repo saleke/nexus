@@ -80,8 +80,8 @@ def main():
     print("\n--- STEP 2: Waiting 6 seconds for Celery processing ---")
     time.sleep(6)
 
-    print("\n--- STEP 3: Executing DBSCAN Event Birth Cron ---")
-    os.system("PYTHONPATH=. python cron_event_birth.py")
+    print("\n--- STEP 3: Executing Event Birth Batch Pipeline ---")
+    os.system(f"{sys.executable} -m post_clustering_pipeline.jobs.event_birth")
 
     # Display clustering results after birth cron completes
     print_clustering_results()
@@ -106,7 +106,7 @@ def main():
         print(f"[!] Database lookup failed during Step 4: {e}")
 
     print("\n--- STEP 5: Executing Monthly LoRA Training Cycle & Hot-Swap ---")
-    os.system("PYTHONPATH=. python cron_monthly_learner.py")
+    os.system(f"{sys.executable} -m post_clustering_pipeline.jobs.monthly_learner")
 
 if __name__ == "__main__":
     main()

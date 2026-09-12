@@ -13,8 +13,8 @@ from dataclasses import dataclass
 
 import requests
 
-from .config import DATABASE_URL
-from .db import get_db_connection
+from ..config import DATABASE_URL
+from ..db import get_db_connection
 
 
 TOPICS = {
