@@ -116,6 +116,12 @@ def run_clustering_pipeline():
     cur = conn.cursor()
     
     try:
+        # Do not discard fresh uncertainty, but prevent an unbounded candidate buffer.
+        cur.execute("""
+            UPDATE posts SET assignment_status = 'noise', assignment_updated_at = NOW()
+            WHERE event_id IS NULL AND assignment_status IN ('pending', 'candidate')
+              AND created_at < NOW() - INTERVAL '24 hours';
+        """)
         active_centroids = get_active_centroids(cur)
         
         cur.execute(
@@ -173,6 +179,7 @@ def run_clustering_pipeline():
                         "UPDATE posts SET event_id = %s WHERE id = ANY(%s);",
                         (new_event_id, cluster_post_ids)
                     )
+                    cur.execute("UPDATE posts SET assignment_status = 'assigned', assignment_updated_at = NOW() WHERE id = ANY(%s);", (cluster_post_ids,))
                     cur.execute(
                         "DELETE FROM unclustered_posts_buffer WHERE post_id = ANY(%s);",
                         (cluster_post_ids,)

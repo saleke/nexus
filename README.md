@@ -22,4 +22,24 @@ celery -A post_clustering_pipeline.queues.celery_app worker --loglevel=INFO
 python -m post_clustering_pipeline
 ```
 
-The API is available at `http://localhost:8000`. Cron modules can be run as modules, for example `python -m post_clustering_pipeline.cron_event_birth`.
+The API is available at `http://localhost:8000`. Jobs can be run as modules, for example `python -m post_clustering_pipeline.jobs.event_birth`.
+
+## Host event delivery
+
+Choose one delivery mode with an environment variable:
+
+```env
+EVENT_DELIVERY_MODE=polling
+```
+
+Supported values are `polling`, `long_polling`, and `webhook`. Polling is the default and uses `GET /integration/events` followed by `POST /integration/events/{id}/ack`. The host should store the returned `event_key` and use `after=<last_event_id>` on the next request. Webhook configuration is reserved for the delivery worker and uses `EVENT_WEBHOOK_URL`.
+
+During the build phase, platform identity fields are optional so local test clients can continue sending only `user_id` and `content`. A future versioned production contract can make them required without adding another runtime setting.
+
+For a self-contained deployment, use Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The API, worker, Redis, PostgreSQL/pgvector, and schema migration will start in dependency order.

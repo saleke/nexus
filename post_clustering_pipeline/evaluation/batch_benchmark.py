@@ -1,7 +1,7 @@
 """Generate and run a realistic synthetic social-post clustering benchmark.
 
 Requires the API, Celery worker, Redis, PostgreSQL, and pgvector to be running.
-Run with: ``python -m post_clustering_pipeline.simulate_social_benchmark``.
+Run with: ``python -m post_clustering_pipeline.evaluation.batch_benchmark``.
 """
 
 from __future__ import annotations
@@ -115,26 +115,15 @@ def build_posts(events: int, posts_per_event: int, noise: int, seed: int) -> lis
     return result
 
 
-def reset_database() -> None:
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE posts, event_hubs, unclustered_posts_buffer RESTART IDENTITY CASCADE;")
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def run(args: argparse.Namespace) -> None:
     posts = build_posts(args.events, args.posts_per_event, args.noise, args.seed)
-    reset_database()
     started = time.monotonic()
     accepted = 0
     labels_by_id: dict[int, str | None] = {}
-    for post in posts:
+    for index, post in enumerate(posts):
         response = requests.post(
             f"{args.api}/posts",
-            json={"user_id": post.user_id, "content": post.content},
+            json={"user_id": post.user_id, "content": post.content, "platform": "benchmark", "source_id": f"batch-{args.seed}", "external_post_id": f"post-{index}"},
             timeout=30,
         )
         response.raise_for_status()
@@ -142,7 +131,7 @@ def run(args: argparse.Namespace) -> None:
         accepted += 1
     time.sleep(args.wait)
 
-    from .cron_event_birth import run_clustering_pipeline
+    from ..jobs.event_birth import run_clustering_pipeline
 
     run_clustering_pipeline()
     elapsed = time.monotonic() - started

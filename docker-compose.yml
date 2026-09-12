@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: clustering_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d clustering_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: sh -c "until pg_isready -h postgres -U postgres -d clustering_db; do sleep 2; done; PGPASSWORD=postgres psql -h postgres -U postgres -d clustering_db -f post_clustering_pipeline/schema.sql"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    build: .
+    command: python -m post_clustering_pipeline
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  worker:
+    build: .
+    command: celery -A post_clustering_pipeline.queues.celery_app worker --loglevel=INFO
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+volumes:
+  postgres_data:

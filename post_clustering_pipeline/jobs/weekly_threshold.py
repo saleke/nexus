@@ -24,7 +24,7 @@ def optimize_threshold():
             return
 
         scores = np.array([float(r["initial_similarity_score"]) for r in rows])
-        labels = np.array([1 if r["feedback_type"] == "auto_confirmed" else 0 for r in rows])
+        labels = np.array([1 if r["feedback_type"] in {"auto_confirmed", "user_confirmed"} else 0 for r in rows])
 
         def objective(threshold_vec):
             thresh = threshold_vec[0]

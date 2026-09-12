@@ -30,19 +30,6 @@ POST_DATA = [
     {"user_id": 405, "content": "Tech stocks lead broad market surge following Federal Reserve monetary policy pivot."}
 ]
 
-def reset_database():
-    """Clears all accumulated data before running the pipeline simulation."""
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        cur.execute("TRUNCATE posts, event_hubs, unclustered_posts_buffer RESTART IDENTITY CASCADE;")
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("[✓] Database reset complete.")
-    except Exception as e:
-        print(f"[!] Database reset failed: {e}")
-
 def print_clustering_results():
     """Prints clustered events and unclustered noise posts from the database."""
     conn = psycopg2.connect(DB_URL)
@@ -84,7 +71,6 @@ def print_clustering_results():
 
 def main():
     # 0. Wipe database before each simulation run
-    reset_database()
 
     print("\n--- STEP 1: Ingesting 20 Posts Across 4 Topics ---")
     for idx, post in enumerate(POST_DATA, start=1):
