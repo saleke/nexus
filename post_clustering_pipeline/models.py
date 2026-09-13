@@ -1,9 +1,12 @@
 import logging
+import threading
+from datetime import datetime, timezone
+
 import torch
 from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer
 
-from .config import BASE_MODEL_NAME, LORA_ADAPTER_DIR, REQUIRE_LORA_ADAPTER
+from .config import BASE_MODEL_NAME, LORA_ADAPTER_DIR, REQUIRE_LORA_ADAPTER, MODEL_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,10 @@ class EmbeddingEngine:
         self.adapter_path = adapter_path
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_name)
         base = AutoModel.from_pretrained(base_model_name)
+        # RETAIN the base: a later reload_adapter builds a fresh PeftModel over
+        # this same graph (never re-downloads, never mutates in place), then
+        # rebinds atomically via swap_model under _MODEL_SWAP_LOCK.
+        self.base_model = base
 
         self.adapter_loaded = False
         try:
@@ -27,6 +34,14 @@ class EmbeddingEngine:
 
         self.freeze_all()
         self.model.eval()
+
+    def swap_model(self, fresh) -> None:
+        """Atomic rebind of the served weights. ``encode_batch``/``encode`` grab
+        the same ``_MODEL_SWAP_LOCK`` and resolve ``self.model`` under it, so a
+        swap is either fully-before or fully-after an in-flight batch - never
+        mid-forward (zero downtime: the old tensor graph stays intact)."""
+        with _MODEL_SWAP_LOCK:
+            self.model = fresh
 
     def freeze_all(self):
         """Explicitly freeze all parameters for inference."""
@@ -80,7 +95,56 @@ class EmbeddingEngine:
 _embedding_engine: EmbeddingEngine | None = None
 
 
-def get_embedding_engine() -> EmbeddingEngine:
+_MODEL_SWAP_LOCK = threading.RLock()
+
+# The LIVE adapter generation the process is CURRENTLY serving. Read from this
+# (never from config defaults at era-anchor time) so policy-era filters (#11)
+# and the swapped-in encoder always agree on the same generation - a reload mid-
+# stream can never leave the era anchor pointing at an adapter the factory is
+# no longer serving. Promotion announces by writing here, atomically with the
+# weight swap (build-then-swap hold the same lock).
+_active_model_version: str = MODEL_VERSION
+_last_loaded_at: datetime | None = None
+_loaded_adapter_path: str | None = None
+
+
+def get_active_model_version() -> str:
+    """Generation the live encoder currently serves (era anchor source)."""
+    return _active_model_version
+
+
+def reload_adapter(adapter_path: str, *, model_version: str, cur=None) -> bool:
+    """Zero-downtime adapter swap: build a fresh PeftModel on the RETAINED
+    base, then rebind under an exclusive lock (never mutate in place, so a
+    concurrent ``encode_batch`` keeps its resolved tensor graph intact).
+
+    Returns True iff this process actually swapped (another worker that already
+    promoted the same version returns False -> no double-work).
+    """
+    global _active_model_version, _last_loaded_at, _loaded_adapter_path
+    with _MODEL_SWAP_LOCK:
+        if model_version == _active_model_version and _loaded_adapter_path == adapter_path:
+            return False
+        engine = get_embedding_engine()
+        if engine.base_model is None:
+            return False
+        try:
+            fresh = PeftModel.from_pretrained(engine.base_model, adapter_path)
+        except Exception as exc:
+            logger.error("adapter swap rejected (0-downtime preserved): %s", exc)
+            return False
+        fresh.eval()
+        for p in fresh.parameters():
+            p.requires_grad = False
+        _adapter_path = adapter_path
+        # Atomic rebind: this process serves the fresh weights now.
+        _active_model_version = model_version
+        _last_loaded_at = datetime.now(timezone.utc)
+        _loaded_adapter_path = adapter_path
+        # Swap the engine so subsequent encode_batch calls use the new adapter.
+        engine.swap_model(fresh)
+        logger.info("adapter swapped: %s -> %s (epoch %s)", _adapter_path, model_version, _last_loaded_at.isoformat())
+        return True
     """Return the process-local engine, loading model weights on first use."""
     global _embedding_engine
     if _embedding_engine is None:
