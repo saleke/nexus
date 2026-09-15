@@ -6,7 +6,7 @@
   <title>{% block title %}Nexus Control{% endblock %}</title>
   <script src="/admin/static/htmx.min.js?v=3"></script>
   <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
-  <link rel="stylesheet" href="/admin/static/panel.css?v=28">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=29">
   {% block head %}{% endblock %}
 </head>
 <body>
@@ -53,7 +53,7 @@
       </a>
     </nav>
     <div class="nav-foot">
-      <div class="nav-auth-dot" title="{% if api_token_configured %}Shared API bearer token is set — API auth on{% else %}No API_AUTH_TOKEN set — the API is open (dev mode){% endif %}">
+      <div class="nav-auth-dot" title="{% if api_token_configured %}Shared API bearer token is set, so API auth is on{% else %}No API_AUTH_TOKEN set, the API is open in dev mode{% endif %}">
         {% if api_token_configured %}<span class="dot ok" aria-hidden="true"></span>api auth on{% else %}<span class="dot warn" aria-hidden="true"></span>api auth off{% endif %}
       </div>
       <div class="nav-session">
@@ -78,7 +78,7 @@
       <span class="content-title">Nexus</span>
       <span class="spacer"></span>
       <div class="health-pill" id="health-pill" hx-get="/admin/health/ready" hx-trigger="load, every 30s" hx-swap="innerHTML">
-        <span class="health-loading" aria-hidden="true">—</span><span>&nbsp;checking</span>
+        <span class="health-loading" aria-hidden="true">…</span><span>&nbsp;checking</span>
       </div>
     </header>
     {% block content %}{% endblock %}

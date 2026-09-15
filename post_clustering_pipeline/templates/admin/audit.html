@@ -1,23 +1,93 @@
 {% extends "base.html" %}
+{% block title %}Audit log · Nexus Control{% endblock %}
 {% block content %}
-<div class="page-head"><h1>Audit log</h1></div>
-<table class="tbl">
-  <thead><tr><th>id</th><th>actor</th><th>action</th><th>entity</th><th>id</th><th>before</th><th>after</th><th>at</th></tr></thead>
-  <tbody>
-    {% for r in rows %}
-    <tr>
-      <td>{{ r.id }}</td>
-      <td>{{ r.actor }}</td>
-      <td><code>{{ r.action }}</code></td>
-      <td>{{ r.entity_type }}</td>
-      <td>{{ r.entity_id or '—' }}</td>
-      <td class="muted small">{{ r.before_state or '' }}</td>
-      <td class="muted small">{{ r.after_state or '' }}</td>
-      <td class="muted tiny">{{ r.created_at }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="8" class="muted">No admin actions recorded.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="page-head">
+  <h1>Audit log</h1>
+  <p class="page-sub muted small">Every owner action in order, with who performed it, what it touched, and the exact fields it changed.</p>
+</div>
+
+<div class="metric-row">
+  <div class="metric-card">
+    <span class="metric-label">Entries</span>
+    <span class="metric-value">{{ stats.total }}</span>
+  </div>
+  <div class="metric-card metric-policy">
+    <span class="metric-label">Last 24h</span>
+    <span class="metric-value">{{ stats.recent }}</span>
+  </div>
+  <div class="metric-card metric-threshold">
+    <span class="metric-label">Actors</span>
+    <span class="metric-value">{{ stats.actors }}</span>
+  </div>
+  <div class="metric-card metric-embedding">
+    <span class="metric-label">Entity types</span>
+    <span class="metric-value">{{ stats.entities }}</span>
+  </div>
+</div>
+
+<form class="filter-bar" hx-get="/admin/audit" hx-target="#audit-panel" hx-swap="outerHTML"
+      hx-trigger="submit, change from:select">
+  <input type="hidden" name="frag" value="results">
+  <label class="filter-field">Search
+    <input type="search" name="q" value="{{ query }}" placeholder="action, actor, id, field…" autocomplete="off">
+  </label>
+  <label class="filter-field">Actor
+    <select name="actor">
+      <option value="">any actor</option>
+      {% for a in options.actors %}
+      <option value="{{ a }}" {{ 'selected' if actor == a }}>{{ a }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="filter-field">Area
+    <select name="domain">
+      <option value="">any area</option>
+      {% for d in options.domains %}
+      <option value="{{ d.code }}" {{ 'selected' if domain == d.code }}>{{ d.label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="filter-field">Entity
+    <select name="entity">
+      <option value="">any entity</option>
+      {% for e in options.entities %}
+      <option value="{{ e.code }}" {{ 'selected' if entity == e.code }}>{{ e.label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="filter-field">Period
+    <select name="window">
+      {% for code, label, _hours in windows %}
+      <option value="{{ code }}" {{ 'selected' if window == code }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button class="btn" type="submit">Apply</button>
+  {% if has_filters %}
+  <a class="btn ghost" href="/admin/audit">Reset</a>
+  {% endif %}
+</form>
+
+<div id="audit-panel">
+  {% include "audit_results.html" %}
+</div>
+
+<script>
+(function () {
+  // Row expansion: open one entry's detail block. Delegated at document level
+  // so it keeps working on rows htmx appends later.
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest("button.row-expand");
+    if (!btn) return;
+    var row = btn.closest("tr.dec-row");
+    if (!row) return;
+    var detail = row.nextElementSibling;
+    if (!detail || !detail.classList.contains("dec-detail")) return;
+    var open = !detail.hidden;
+    detail.hidden = open;
+    row.classList.toggle("expanded", !open);
+    btn.setAttribute("aria-expanded", open ? "false" : "true");
+  });
+})();
+</script>
 {% endblock %}

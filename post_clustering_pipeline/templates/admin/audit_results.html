@@ -1,0 +1,30 @@
+<div class="results-head">
+  <span class="muted small">
+    Showing <b>{{ entries|length }}</b> of <b>{{ total }}</b>
+    {% if has_filters %}matching action{{ '' if total == 1 else 's' }}{% else %}recorded action{{ '' if total == 1 else 's' }}{% endif %}
+  </span>
+  <span class="badge neutral">{{ window_label }}</span>
+</div>
+
+{% if entries %}
+<table class="tbl audit-tbl">
+  <thead>
+    <tr>
+      <th class="th-when">when</th>
+      <th>actor</th>
+      <th>action</th>
+      <th>entity</th>
+      <th class="th-changes">changes</th>
+      <th class="td-detail"></th>
+    </tr>
+  </thead>
+  <tbody id="audit-rows">
+    {% include "audit_rows.html" %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <p class="muted">No audit entries match these filters.</p>
+  {% if has_filters %}<p class="muted tiny">Widen the period or clear a filter to see more.</p>{% endif %}
+</div>
+{% endif %}

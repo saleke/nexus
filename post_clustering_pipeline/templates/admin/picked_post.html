@@ -4,7 +4,7 @@
 <input type="hidden" name="post_id" value="{{ post.post_id }}">
 <input type="hidden" name="event_id" value="{{ post.event_id or '' }}">
 <div class="chip strong">{{ post.content_preview or ('post #' ~ post.post_id) }}
-  <span class="muted tiny">in hub {{ post.event_id or '—' }}</span>
+  {% if post.event_id %}<span class="muted tiny">in hub #{{ post.event_id }}</span>{% else %}<span class="muted tiny">no hub yet</span>{% endif %}
 </div>
 <button class="btn small ghost" hx-get="/admin/pick-clear"
         hx-target="{{ slot_map.get(picker, '#picked-post') }}">clear</button>

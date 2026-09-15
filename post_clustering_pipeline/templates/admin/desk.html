@@ -7,7 +7,7 @@
 <div id="refs-status" class="alert danger" style="display:none"></div>
 
 <p class="desk-intro">
-  Everything here is picked by its <b>content</b> — search a fragment you remember, a card appears,
+  Everything here is picked by its <b>content</b>: search a fragment you remember, a card appears,
   one click places it. Merges move the <b>source</b> hub into the <b>target</b> hub; every action
   is guarded the same way as the API, lands in the outbox, and is reversible from the merge log.
 </p>
@@ -86,7 +86,7 @@
               hx-confirm="Pin the selected post into the chosen hub? It becomes assigned and the confirmation is recorded as human feedback.">
         Confirm post → hub
       </button>
-      <span class="note">use only when genuinely correct — it feeds the tuner's positive signal.</span>
+      <span class="note">use only when genuinely correct, since it feeds the tuner's positive signal.</span>
     </div>
     <div id="confirm-msg" class="msg-box"></div>
   </form>
@@ -104,7 +104,7 @@
     if (url.indexOf('/admin/refs') === -1) return;
     var kind = evt.type === 'htmx:sendError' ? 'offline' : 'server error';
     statusEls.forEach(function (s) {
-      s.textContent = 'Search request failed (' + kind + ') — the API may be restarting. Try again in a moment.';
+      s.textContent = 'Search request failed (' + kind + '). The API may be restarting, so try again in a moment.';
       s.style.display = 'block';
     });
     window.clearTimeout(statusEls[0]._t);

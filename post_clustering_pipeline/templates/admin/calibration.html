@@ -17,13 +17,13 @@
     <div>
       <h2>{{ k.name }}</h2>
       <span class="muted small">valid range {{ k.lo }} – {{ k.hi }} ({{ k.decimals }} decimals) · current
-        <span id="cur-{{ k.name }}" class="chip threshold">{{ "%.4f"|format(k.current) if k.current is not none else '—' }}</span></span>
+        <span id="cur-{{ k.name }}" class="chip threshold">{{ "%.4f"|format(k.current) if k.current is not none else 'n/a' }}</span></span>
     </div>
   </div>
 
   {% if k.warning %}
   <div class="alert warn" role="alert">
-    <b>Warning — this setting affects clustering performance.</b>
+    <b>Warning: this setting affects clustering performance.</b>
     {{ k.warning.warning }}
     <ul class="small">
       {% for a in k.warning.affected %}<li>{{ a }}</li>{% endfor %}

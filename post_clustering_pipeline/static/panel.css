@@ -710,3 +710,77 @@ input[type="radio"] { accent-color: var(--accent); }
 code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); align-items: start; }
 .hub-mention { border-bottom: 1px dashed var(--border); color: var(--accent); }
+
+/* ---------------------------------------------------------------------------
+   Audit log
+   Each entry carries many properties, so the list stays narrow and scannable
+   while the full field level diff opens on demand instead of dumping the raw
+   snapshot into the row.
+   --------------------------------------------------------------------------- */
+.page-sub { margin: 2px 0 0; }
+
+.results-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-1); margin: var(--space-2) 0 var(--space-1);
+}
+
+.audit-tbl td { vertical-align: top; }
+.th-when { width: 96px; }
+.th-changes { width: 118px; }
+.audit-tbl .td-time { white-space: nowrap; }
+.audit-tbl .td-time .strong { display: block; }
+.audit-tbl .td-actor { max-width: 220px; }
+.actor-mail {
+  display: inline-block; max-width: 210px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+.td-entity code { white-space: nowrap; }
+
+/* Change tally: added / changed / removed counts as compact pills. */
+.change-count { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.change-pill {
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border);
+}
+.change-pill.add { color: var(--ok); border-color: var(--ok); }
+.change-pill.mod { color: var(--warn); border-color: var(--warn); }
+.change-pill.del { color: var(--danger); border-color: var(--danger); }
+
+/* Detail: field level diff plus the untouched raw snapshot. */
+.audit-detail { padding: 2px 0 6px; }
+.diff-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--space-1); margin-bottom: 6px;
+}
+.diff-tbl { max-width: 720px; }
+.th-field { width: 180px; }
+.diff-tbl code { background: transparent; padding: 0; }
+.diff-added > td { background: rgba(63, 185, 80, .08); }
+.diff-removed > td { background: rgba(248, 81, 73, .08); }
+.diff-changed > td { background: rgba(210, 153, 34, .08); }
+.diff-added .diff-after code { color: var(--ok); }
+.diff-removed .diff-before code { color: var(--danger); }
+.diff-changed .diff-before code { color: var(--danger); }
+.diff-changed .diff-after code { color: var(--ok); }
+
+.audit-facts { margin-top: var(--space-2); }
+
+.raw-payload { margin-top: var(--space-2); }
+.raw-payload summary {
+  cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.raw-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-1);
+  margin-top: 6px;
+}
+.raw-grid .code-block { max-height: 220px; overflow: auto; margin: 0; }
+.raw-grid .muted { display: block; margin-bottom: 3px; }
+
+.load-cell { text-align: center; color: var(--muted); padding: 10px; }
+.empty-state { padding: var(--space-2) 0; }
+
+@media (max-width: 760px) {
+  .raw-grid { grid-template-columns: 1fr; }
+  .th-when, .th-changes { width: auto; }
+}

@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nexus Control — create owner account</title>
+  <title>Nexus Control · create owner account</title>
   <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
-  <link rel="stylesheet" href="/admin/static/panel.css?v=19">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=29">
 </head>
 <body class="auth-body">
 <main class="auth-shell">
@@ -22,7 +22,7 @@
     <div class="alert danger" role="alert">{{ error }}</div>
     {% endif %}
 
-    <p class="muted small">No owner account exists yet — create the first one to take control of the plane.</p>
+    <p class="muted small">No owner account exists yet. Create the first one to take control of the plane.</p>
     <form class="auth-form" method="post" action="/admin/register" autocomplete="off">
       <label>Email <input type="email" name="email" required autofocus></label>
       <label>Password (min 10 chars) <input type="password" name="password" required minlength="10"></label>

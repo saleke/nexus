@@ -1,0 +1,53 @@
+<div class="audit-detail">
+  {% if e.changes %}
+  <div class="diff-head">
+    <span class="strong">Field changes</span>
+    <span class="muted tiny">{{ e.tally.total }} field{{ '' if e.tally.total == 1 else 's' }} recorded for this action</span>
+  </div>
+  <table class="tbl compact diff-tbl">
+    <thead>
+      <tr><th class="th-field">field</th><th>before</th><th>after</th></tr>
+    </thead>
+    <tbody>
+      {% for c in e.changes %}
+      <tr class="diff-{{ c.kind }}">
+        <td><code>{{ c.field }}</code></td>
+        <td class="diff-before">
+          {% if c.kind == 'added' %}<span class="muted tiny">absent</span>
+          {% else %}<code>{{ c.before }}</code>{% endif %}
+        </td>
+        <td class="diff-after">
+          {% if c.kind == 'removed' %}<span class="muted tiny">removed</span>
+          {% else %}<code>{{ c.after }}</code>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">This action recorded no field changes. It is a pure event, such as a password change or an enrollment step.</p>
+  {% endif %}
+
+  <div class="dec-detail-grid audit-facts">
+    <div><span class="muted">entry</span><b>#{{ e.id }}</b></div>
+    <div><span class="muted">area</span><b>{{ e.domain_label }}</b></div>
+    <div><span class="muted">entity</span><b>{{ e.entity_label }}{% if e.entity_id %} #{{ e.entity_id }}{% endif %}</b></div>
+    <div><span class="muted">recorded</span><b>{{ e.created_at.strftime('%Y-%m-%d %H:%M:%S') if e.created_at else 'unknown' }}</b></div>
+  </div>
+
+  {% if e.has_snapshot %}
+  <details class="raw-payload">
+    <summary>Raw snapshot</summary>
+    <div class="raw-grid">
+      <div>
+        <span class="muted tiny">before</span>
+        <pre class="code-block">{{ e.before_json }}</pre>
+      </div>
+      <div>
+        <span class="muted tiny">after</span>
+        <pre class="code-block">{{ e.after_json }}</pre>
+      </div>
+    </div>
+  </details>
+  {% endif %}
+</div>

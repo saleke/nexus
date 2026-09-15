@@ -9,7 +9,7 @@
   </div>
   <div class="metric-card">
     <span class="metric-label">Celery queue</span>
-    <span class="metric-value">{{ queue_len if queue_len is not none else '—' }}</span>
+    <span class="metric-value">{{ queue_len if queue_len is not none else 'n/a' }}</span>
   </div>
   <div class="metric-card">
     <span class="metric-label">DLQ failed events</span>

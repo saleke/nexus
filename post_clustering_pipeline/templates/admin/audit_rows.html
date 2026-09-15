@@ -1,21 +1,56 @@
-{% for r in rows %}
-<tr>
-  <td>{{ r.id }}</td>
-  <td>{{ r.actor }}</td>
-  <td><code>{{ r.action }}</code></td>
-  <td>{{ r.entity_type }}</td>
-  <td>{{ r.entity_id or '—' }}</td>
-  <td class="muted small">{{ r.before_state or '' }}</td>
-  <td class="muted small">{{ r.after_state or '' }}</td>
-  <td class="muted tiny">{{ r.created_at }}</td>
+{% for e in entries %}
+<tr class="dec-row">
+  <td class="td-time">
+    <span class="strong">{{ e.created_at.strftime('%d %b') if e.created_at else 'unknown' }}</span>
+    <span class="muted tiny">{{ e.created_at.strftime('%H:%M:%S') if e.created_at else '' }}</span>
+  </td>
+  <td class="td-actor">
+    {% if e.actor == 'panel' %}
+    <span class="badge neutral">panel</span>
+    {% else %}
+    <span class="actor-mail" title="{{ e.actor }}">{{ e.actor }}</span>
+    {% endif %}
+  </td>
+  <td>
+    <span class="badge neutral">{{ e.domain_label }}</span>
+    <span class="strong">{{ e.action_label }}</span>
+    <div><code class="muted tiny">{{ e.action }}</code></div>
+  </td>
+  <td class="td-entity">
+    <span class="muted small">{{ e.entity_label }}</span>
+    {% if e.entity_id %}<div><code class="tiny">#{{ e.entity_id }}</code></div>{% endif %}
+  </td>
+  <td class="td-changes">
+    {% if e.tally.total %}
+    <span class="change-count" title="{{ e.tally.total }} field{{ '' if e.tally.total == 1 else 's' }} changed">
+      {% if e.tally.added %}<span class="change-pill add">+{{ e.tally.added }}</span>{% endif %}
+      {% if e.tally.changed %}<span class="change-pill mod">~{{ e.tally.changed }}</span>{% endif %}
+      {% if e.tally.removed %}<span class="change-pill del">-{{ e.tally.removed }}</span>{% endif %}
+    </span>
+    {% elif e.has_snapshot %}
+    <span class="muted small">no changes</span>
+    {% else %}
+    <span class="muted tiny">event only</span>
+    {% endif %}
+  </td>
+  <td class="td-detail">
+    <button class="row-expand" type="button" aria-expanded="false" aria-label="show audit entry details">&#9662;</button>
+  </td>
+</tr>
+<tr class="dec-detail" hidden>
+  <td colspan="6">
+    {% include "audit_detail.html" %}
+  </td>
 </tr>
 {% else %}
-<tr><td colspan="8" class="muted">No admin actions recorded.</td></tr>
+{% if not entries %}
+<tr><td colspan="6" class="muted">No audit entries match these filters.</td></tr>
+{% endif %}
 {% endfor %}
-{% if has_more and rows %}
-<tr class="load-row" id="audit-more"
-    hx-get="/admin/audit?offset={{ next_offset }}&amp;partial=1"
-    hx-target="#audit-rows" hx-swap="beforeend" hx-trigger="intersect once">
-  <td colspan="8" class="load-cell">loading more entries…</td>
+{% if has_more and entries %}
+<tr id="audit-more" class="load-row"
+    hx-get="{{ more_url }}" hx-target="this" hx-swap="outerHTML"
+    hx-trigger="intersect once">
+  <td colspan="6" class="load-cell">loading more entries…</td>
 </tr>
 {% endif %}

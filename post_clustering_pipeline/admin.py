@@ -1619,15 +1619,49 @@ async def panel_delete_consumer(request: Request, consumer_id: str):
 # ---------------------------------------------------------------------------
 
 @router.get("/audit")
-async def panel_audit(request: Request, limit: int = 200):
+async def panel_audit(request: Request, actor: str = "", domain: str = "",
+                      entity: str = "", window: str = "", q: str = "",
+                      limit: int = 0, offset: int = 0, frag: str = ""):
+    """Audit log: scannable entries with filters, paging, and a per-entry diff.
+
+    Snapshots are stored as JSONB and used to be rendered raw, which read as a
+    data dump. Each entry is now reduced to a labelled summary line and expands
+    on demand into a field level diff of what actually changed.
+
+    ``frag=results`` swaps the table region (filter submits) and ``frag=rows``
+    appends the next page (load more).
+    """
+    from . import audit_view as av
+
+    window = window or av.DEFAULT_WINDOW
+    limit = limit or av.DEFAULT_LIMIT
     with get_db_cursor(commit=False) as cur:
-        cur.execute(
-            "SELECT id, actor, action, entity_type, entity_id, before_state, after_state, created_at "
-            "FROM admin_audit_log ORDER BY id DESC LIMIT %s;",
-            (min(limit, 500),)
-        )
-        rows = cur.fetchall() or []
-    return templates.TemplateResponse(request,"audit.html", _ctx(request, rows=rows), headers=TEMPLATE_METADATA)
+        entries, total = av.fetch_entries(
+            cur, actor=actor, domain=domain, entity=entity,
+            window=window, query=q, limit=limit, offset=offset)
+        stats = av.audit_stats(cur)
+        options = av.filter_options(cur)
+
+    from urllib.parse import urlencode
+
+    loaded = offset + len(entries)
+    # The "load more" sentinel reuses the active filters; building the query
+    # here keeps the template free of string assembly.
+    carry = {k: v for k, v in (("actor", actor), ("domain", domain),
+                               ("entity", entity), ("window", window),
+                               ("q", q.strip()), ("limit", limit)) if v}
+    more_url = "/admin/audit?" + urlencode({**carry, "frag": "rows", "offset": loaded})
+    ctx = _ctx(request,
+               entries=entries, total=total, stats=stats, options=options,
+               actor=actor, domain=domain, entity=entity, window=window,
+               window_label=av.window_label(window), query=q,
+               windows=av.AUDIT_WINDOWS, limit=limit, offset=offset,
+               has_more=loaded < total, next_offset=loaded, more_url=more_url,
+               has_filters=bool(actor or domain or entity or q.strip()
+                                or window != av.DEFAULT_WINDOW))
+    template = {"rows": "audit_rows.html",
+                "results": "audit_results.html"}.get(frag, "audit.html")
+    return templates.TemplateResponse(request, template, ctx, headers=TEMPLATE_METADATA)
 
 
 @router.get("/settings")

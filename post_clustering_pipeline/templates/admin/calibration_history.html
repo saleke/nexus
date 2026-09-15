@@ -9,7 +9,7 @@
       <td>{{ h.id }}</td>
       <td>{{ h.policy_version }}</td>
       <td>{{ h.knob }}</td>
-      <td>{{ h.old_value if h.old_value is not none else '—' }} → {{ h.new_value }}</td>
+      <td>{{ h.old_value if h.old_value is not none else 'n/a' }} → {{ h.new_value }}</td>
       <td><span class="badge {{ 'ok' if h.status == 'applied' else ('warn' if h.status == 'proposed' else 'muted') }}">{{ h.status }}</span></td>
       <td>{{ h.source }}</td>
       <td>{{ h.actor }}</td>

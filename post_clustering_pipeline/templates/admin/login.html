@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nexus Control — login</title>
+  <title>Nexus Control · login</title>
   <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
-  <link rel="stylesheet" href="/admin/static/panel.css?v=28">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=29">
 </head>
 <body class="auth-body">
 <main class="auth-shell">
@@ -23,7 +23,7 @@
     {% endif %}
 
     {% if must_register %}
-    <p class="muted small">No owner account exists yet — create the first one to take control of the plane.</p>
+    <p class="muted small">No owner account exists yet. Create the first one to take control of the plane.</p>
     <form class="auth-form" method="post" action="/admin/register" autocomplete="off">
       <label>Email <input type="email" name="email" required autofocus></label>
       <label>Password <input type="password" name="password" required minlength="10"></label>
@@ -44,7 +44,7 @@
     </a>
     <div class="or-divider"><span>or use a password</span></div>
     {% else %}
-    <p class="muted small">Google sign-in is not configured yet — a password works below. Set
+    <p class="muted small">Google sign-in is not configured yet, so a password works below. Set
       <code>GOOGLE_OAUTH_CLIENT_ID</code> / <code>GOOGLE_OAUTH_CLIENT_SECRET</code> to enable the button.</p>
     {% endif %}
 

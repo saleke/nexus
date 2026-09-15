@@ -1,10 +1,10 @@
-{# result card after propose/apply/revert — always surfaces the warning + estimate #}
+{# result card after propose/apply/revert: always surfaces the warning + estimate #}
 {% if error %}
 <p class="alert">{{ error }}</p>
 {% else %}
 <div class="alert {{ 'warn' if result.status == 'proposed' else 'ok' }}">
   <b>{% if result.status == 'applied' %}Applied{% elif result.status == 'proposed' %}Proposed{% else %}Change{% endif %}. </b>
-  {{ result.knob }}: {{ "%.4f"|format(result.old_value) if result.old_value is not none else '—' }} → {{ "%.4f"|format(result.new_value) }}
+  {{ result.knob }}: {{ "%.4f"|format(result.old_value) if result.old_value is not none else 'n/a' }} → {{ "%.4f"|format(result.new_value) }}
   <span class="muted small">(policy version {{ result.policy_version }} · id {{ result.policy_history_id }})</span>
 </div>
 {% if result.warning %}
@@ -20,7 +20,7 @@
     <tr><td>decisions on current threshold</td><td>{{ assessed.known_decisions }}</td></tr>
     <tr><td>assigned posts that would drop out</td><td>{{ assessed.would_flip_down }}</td></tr>
     <tr><td>candidate posts that would flip up</td><td>{{ assessed.would_flip_up }}</td></tr>
-    <tr><td class="muted small" colspan="2">estimate only — per-row runner margins are not replayed.</td></tr>
+    <tr><td class="muted small" colspan="2">estimate only; per-row runner margins are not replayed.</td></tr>
   </tbody>
 </table>
 {% endif %}
