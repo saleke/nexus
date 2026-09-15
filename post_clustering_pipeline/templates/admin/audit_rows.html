@@ -1,0 +1,21 @@
+{% for r in rows %}
+<tr>
+  <td>{{ r.id }}</td>
+  <td>{{ r.actor }}</td>
+  <td><code>{{ r.action }}</code></td>
+  <td>{{ r.entity_type }}</td>
+  <td>{{ r.entity_id or '—' }}</td>
+  <td class="muted small">{{ r.before_state or '' }}</td>
+  <td class="muted small">{{ r.after_state or '' }}</td>
+  <td class="muted tiny">{{ r.created_at }}</td>
+</tr>
+{% else %}
+<tr><td colspan="8" class="muted">No admin actions recorded.</td></tr>
+{% endfor %}
+{% if has_more and rows %}
+<tr class="load-row" id="audit-more"
+    hx-get="/admin/audit?offset={{ next_offset }}&amp;partial=1"
+    hx-target="#audit-rows" hx-swap="beforeend" hx-trigger="intersect once">
+  <td colspan="8" class="load-cell">loading more entries…</td>
+</tr>
+{% endif %}

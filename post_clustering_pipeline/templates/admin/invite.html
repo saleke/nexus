@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus Control — accept invite</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=19">
+</head>
+<body class="auth-body">
+<main class="auth-shell">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <svg class="bolt" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
+        <path d="M34 6 L14 38 L28 38 L23 58 L50 26 L35 26 Z" fill="#ffd42a"/>
+      </svg>
+      <span class="auth-title">You've been invited to the Nexus control plane</span>
+    </div>
+
+    <p class="muted small">Choose a password for <span class="strong">{{ email }}</span>.
+      Once set, sign in with this email at the panel login.</p>
+
+    {% if error %}
+    <div class="alert danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <form class="auth-form" method="post" action="/admin/invite/{{ token }}" autocomplete="off">
+      <label>New password
+        <input type="password" name="password" required minlength="10" autofocus>
+      </label>
+      <label>Confirm new password
+        <input type="password" name="confirm" required minlength="10">
+      </label>
+      <button class="btn" type="submit">Set password</button>
+    </form>
+    <p class="muted small"><a href="/admin/login">Back to login</a></p>
+  </div>
+</main>
+</body>
+</html>

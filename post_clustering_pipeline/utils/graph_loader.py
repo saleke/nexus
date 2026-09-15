@@ -2,6 +2,8 @@ import psycopg2
 import torch
 from torch.utils.data import IterableDataset
 
+from ..embed_io import parse_vector_literal
+
 class StreamingPostDataset(IterableDataset):
     def __init__(self, db_url, time_window_hours=12):
         self.db_url = db_url
@@ -20,7 +22,7 @@ class StreamingPostDataset(IterableDataset):
         )
         for row in cur:
             post_id, emb_str, created_at = row
-            embedding = list(map(float, emb_str.strip("[]").split(",")))
+            embedding = parse_vector_literal(emb_str)
             yield {
                 "post_id": post_id, 
                 "embedding": torch.tensor(embedding), 

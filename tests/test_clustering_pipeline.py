@@ -10,7 +10,7 @@ from post_clustering_pipeline.jobs.event_birth import (
     parse_embedding,
     temporal_dataloader,
 )
-from post_clustering_pipeline.tasks import extract_val
+from post_clustering_pipeline.db import extract_val
 
 
 def test_nlp_cleansing():

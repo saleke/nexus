@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Decisions</h1>
+</div>
+
+<form class="filter-bar" hx-get="/admin/decisions" hx-target="#decisions-body" hx-swap="outerHTML"
+      hx-trigger="submit, change from:select">
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <label class="filter-field">Window
+    <select name="window">
+      {% for w, label in [("1h","last hour"),("6h","last 6 hours"),("24h","last 24 hours"),("7d","last 7 days"),("30d","last 30 days"),("all","all time")] %}
+      <option value="{{ w }}" {{ 'selected' if window == w }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="filter-field">Status
+    <select name="status">
+      <option value="" {{ 'selected' if not status }}>all</option>
+      <option value="assigned" {{ 'selected' if status == 'assigned' }}>assigned</option>
+      <option value="candidate" {{ 'selected' if status == 'candidate' }}>candidate</option>
+      <option value="unassigned" {{ 'selected' if status == 'unassigned' }}>unassigned</option>
+      <option value="noise" {{ 'selected' if status == 'noise' }}>noise</option>
+    </select>
+  </label>
+  <label class="filter-field">Post id
+    <input type="number" name="post_id" value="{{ post_id or '' }}" placeholder="any" min="1">
+  </label>
+  <label class="filter-field">Event id
+    <input type="number" name="hub_id" value="{{ hub_id or '' }}" placeholder="any" min="1">
+  </label>
+  <button class="btn" type="submit">Apply</button>
+  <a class="btn ghost" href="/admin/decisions">clear</a>
+</form>
+
+{% include "decisions_body.html" %}
+
+<script>
+(function () {
+  var form = document.querySelector(".filter-bar");
+  if (!form) return;
+  // Sort links live inside the swapped region, so use delegation.
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest(".sort-link");
+    if (!a) return;
+    e.preventDefault();
+    var cur = form.querySelector('input[name="sort"]').value;
+    var next = (cur === a.dataset.asc) ? a.dataset.desc : a.dataset.asc;
+    form.querySelector('input[name="sort"]').value = next;
+    htmx.trigger(form, "submit");
+  });
+
+  // Row expansion: toggle a decision's detail block. Use delegation so it also
+  // works on rows that htmx swaps in later.
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest("button.row-expand");
+    if (!btn) return;
+    var row = btn.closest("tr.dec-row");
+    var detail = row.nextElementSibling;
+    var open = detail && detail.classList.contains("dec-detail") && !detail.hidden;
+    if (open) {
+      detail.hidden = true;
+      row.classList.remove("expanded");
+      btn.setAttribute("aria-expanded", "false");
+    } else if (detail && detail.classList.contains("dec-detail")) {
+      detail.hidden = false;
+      row.classList.add("expanded");
+      btn.setAttribute("aria-expanded", "true");
+    }
+  });
+})();
+</script>
+{% endblock %}

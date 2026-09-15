@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Nexus Control{% endblock %}</title>
+  <script src="/admin/static/htmx.min.js?v=3"></script>
+  <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=28">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div class="shell">
+  <div class="nav-backdrop" id="nav-backdrop" hidden></div>
+  <aside class="nav" id="nav-main">
+    <div class="brand">Nexus<br><span class="brand-sub">control plane</span></div>
+    <nav>
+      <a href="/admin/quality" class="{{ 'active' if nav_active == 'quality' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-6 3 13 3-9 2 3h4"/></svg>
+        <span>Quality</span>
+      </a>
+      <a href="/admin/decisions" class="{{ 'active' if nav_active == 'decisions' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5.5"/></svg>
+        <span>Decisions</span>
+      </a>
+      <a href="/admin/desk" class="{{ 'active' if nav_active == 'desk' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="3"/><path d="M6 7.5v9"/><path d="M18 15c0 2.5-2 4-4.5 4H6"/></svg>
+        <span>Merge desk</span>
+      </a>
+      <a href="/admin/merges" class="{{ 'active' if nav_active == 'merges' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h9M8 12h9M8 18h9"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>
+        <span>Merge log</span>
+      </a>
+      <a href="/admin/calibration" class="{{ 'active' if nav_active == 'calibration' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h4m4 0h8M4 16h8m4 0h4"/><circle cx="12" cy="8" r="2"/><circle cx="16" cy="16" r="2"/></svg>
+        <span>Calibration</span>
+      </a>
+      <a href="/admin/ops" class="{{ 'active' if nav_active == 'ops' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
+        <span>Ops</span>
+      </a>
+      <a href="/admin/audit" class="{{ 'active' if nav_active == 'audit' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.7-7 9-4-1.3-7-4.5-7-9V6z"/><path d="M9 12.5l2 2 4-4.5"/></svg>
+        <span>Audit</span>
+      </a>
+      <a href="/admin/settings" class="{{ 'active' if nav_active == 'settings' else '' }}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>
+        <span>Settings</span>
+      </a>
+      <a href="/docs" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-3"/></svg>
+        <span>API docs</span>
+      </a>
+    </nav>
+    <div class="nav-foot">
+      <div class="nav-auth-dot" title="{% if api_token_configured %}Shared API bearer token is set — API auth on{% else %}No API_AUTH_TOKEN set — the API is open (dev mode){% endif %}">
+        {% if api_token_configured %}<span class="dot ok" aria-hidden="true"></span>api auth on{% else %}<span class="dot warn" aria-hidden="true"></span>api auth off{% endif %}
+      </div>
+      <div class="nav-session">
+        <span class="muted tiny" title="{{ session_email|default('owner') }}">{{ session_email|default('owner') }}</span>
+        <form method="post" action="/admin/logout">
+          <button class="signout-btn" type="submit">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+            Sign out
+          </button>
+        </form>
+      </div>
+    </div>
+  </aside>
+  <main class="content">
+    <header class="content-header">
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-controls="nav-main">
+        <span></span><span></span><span></span>
+      </button>
+      <svg class="bolt" viewBox="0 0 64 64" width="20" height="20" aria-hidden="true">
+        <path d="M34 6 L14 38 L28 38 L23 58 L50 26 L35 26 Z" fill="#ffd42a"/>
+      </svg>
+      <span class="content-title">Nexus</span>
+      <span class="spacer"></span>
+      <div class="health-pill" id="health-pill" hx-get="/admin/health/ready" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <span class="health-loading" aria-hidden="true">—</span><span>&nbsp;checking</span>
+      </div>
+    </header>
+    {% block content %}{% endblock %}
+  </main>
+</div>
+<script>
+(function () {
+  "use strict";
+  var toggle = document.getElementById("nav-toggle");
+  var nav = document.getElementById("nav-main");
+  var backdrop = document.getElementById("nav-backdrop");
+  if (!toggle || !nav) return;
+  function setOpen(open) {
+    nav.classList.toggle("open", open);
+    toggle.classList.toggle("open", open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (backdrop) backdrop.hidden = !open;
+  }
+  toggle.addEventListener("click", function () {
+    setOpen(!nav.classList.contains("open"));
+  });
+  if (backdrop) backdrop.addEventListener("click", function () { setOpen(false); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
+})();
+</script>
+</body>
+</html>

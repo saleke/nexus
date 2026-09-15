@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>Merges</h1></div>
+<div class="metric-row">
+  <div class="metric-card">
+    <span class="metric-label">Total merges</span>
+    <span class="metric-value">{{ total_merges }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Merged</span>
+    <span class="metric-value">{{ merged_count }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Reopened</span>
+    <span class="metric-value">{{ reopened_count }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Posts moved</span>
+    <span class="metric-value">{{ moved_total }}</span>
+  </div>
+</div>
+
+<form class="filter-bar" method="get" action="/admin/merges">
+  <label class="filter-field">Status
+    <select name="status">
+      <option value="">all</option>
+      <option value="merged" {{ 'selected' if f_status == 'merged' else '' }}>merged</option>
+      <option value="reopened" {{ 'selected' if f_status == 'reopened' else '' }}>reopened</option>
+    </select>
+  </label>
+  <label class="filter-field">Search
+    <input type="search" name="q" value="{{ f_q }}" placeholder="hub, initiator, note…" autocomplete="off">
+  </label>
+  <input type="hidden" name="limit" value="50">
+  <button class="btn small" type="submit">Filter</button>
+  {% if f_status or f_q %}<a class="btn ghost small" href="/admin/merges">clear</a>{% endif %}
+</form>
+
+<table class="tbl">
+  <thead><tr><th>id</th><th>source → target</th><th>initiated</th><th>moved</th><th>status</th><th>note</th><th>at</th><th></th></tr></thead>
+  <tbody>
+    {% for m in merges %}
+    <tr>
+      <td>{{ m.id }}</td>
+      <td class="merge-pair">
+        <div class="strong small">→ {{ m.target.label }}</div>
+        <div class="muted tiny">{{ m.source.discourse_type }} · {{ m.source.member_count }}m → {{ m.target.member_count }}m</div>
+      </td>
+      <td>{{ m.initiated_by }}</td>
+      <td>{{ m.moved }}</td>
+      <td><span class="badge {{ 'ok' if m.status == 'merged' else 'muted' }}">{{ m.status }}</span></td>
+      <td class="muted small">{{ m.opened_note or '' }}</td>
+      <td class="muted tiny">{{ m.created_at }}</td>
+      <td>
+        {% if m.status == 'merged' %}
+        <button class="btn danger small" hx-post="/admin/merge/{{ m.id }}/reopen" hx-target="closest tr"
+                hx-confirm="Reopen this merge? {{ m.source.member_count|default(0)|abs }} posts return to the source hub.">
+          reopen
+        </button>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">No merges {{ 'match these filters' if (f_status or f_q) else 'yet' }}.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

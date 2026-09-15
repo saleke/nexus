@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus Control — login</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=28">
+</head>
+<body class="auth-body">
+<main class="auth-shell">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <svg class="bolt" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
+        <path d="M34 6 L14 38 L28 38 L23 58 L50 26 L35 26 Z" fill="#ffd42a"/>
+      </svg>
+      <span class="auth-title">Nexus</span>
+      <span class="auth-sub">control plane</span>
+    </div>
+
+    {% if error %}
+    <div class="alert danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    {% if must_register %}
+    <p class="muted small">No owner account exists yet — create the first one to take control of the plane.</p>
+    <form class="auth-form" method="post" action="/admin/register" autocomplete="off">
+      <label>Email <input type="email" name="email" required autofocus></label>
+      <label>Password <input type="password" name="password" required minlength="10"></label>
+      <button class="btn" type="submit">Create owner account</button>
+    </form>
+    <p class="muted small center">Forgot the password? Use the <em>Sign in with Google</em> button above once set up.</p>
+    {% else %}
+
+    {% if google_enabled %}
+    <a class="btn google-btn" href="/admin/login/google">
+      <svg viewBox="0 0 48 48" width="20" height="20" aria-hidden="true">
+        <path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.4 6 29.5 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.6-.4-3.9z"/>
+        <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.4 6 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/>
+        <path fill="#4CAF50" d="M24 44c5.5 0 10.4-2 14.2-5.4l-6.6-5.6C29.2 34.8 26.7 36 24 36c-5.2 0-9.7-3.3-11.3-8l-6.5 5C9.7 39.7 16.3 44 24 44z"/>
+        <path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.6 5.6C41.6 36.6 44 30.9 44 24c0-1.3-.1-2.6-.4-3.9z"/>
+      </svg>
+      Sign in with Google
+    </a>
+    <div class="or-divider"><span>or use a password</span></div>
+    {% else %}
+    <p class="muted small">Google sign-in is not configured yet — a password works below. Set
+      <code>GOOGLE_OAUTH_CLIENT_ID</code> / <code>GOOGLE_OAUTH_CLIENT_SECRET</code> to enable the button.</p>
+    {% endif %}
+
+    <form class="auth-form" method="post" action="/admin/login" autocomplete="off">
+      <label>Email <input type="email" name="email" required autofocus></label>
+      <label>Password <input type="password" name="password" required></label>
+      <button class="btn" type="submit">Log in</button>
+    </form>
+    <p class="muted small center">{% if google_enabled %}Forgot your password? Recover it through
+      <a href="https://support.google.com/accounts/answer/41078">Google account recovery</a>, then
+      <a href="/admin/login/google">sign in with Google</a>.{% else %}<a href="/admin/forgot">Forgot password?</a>{% endif %}</p>
+    {% endif %}
+  </div>
+</main>
+</body>
+</html>

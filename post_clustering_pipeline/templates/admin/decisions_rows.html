@@ -1,0 +1,41 @@
+{% for d in decided %}
+<tr class="dec-row" data-did="{{ d.post_id }}-{{ d.event_id }}">
+  <td class="td-time muted">{{ d.created_at.strftime('%d %b %H:%M') if d.created_at else '—' }}</td>
+  <td><span class="badge {{ d.status_label }}">{{ d.status_text }}</span></td>
+  <td><span class="badge {{ d.reason_label }}">{{ d.reason_text }}</span></td>
+  <td class="td-num">{{ "%.4f"|format(d.similarity) if d.similarity is not none else '—' }}</td>
+  <td class="td-post">
+    <div class="strong small">{{ d.post.content_preview or ('post #' ~ d.post_id) }}</div>
+    <div class="muted tiny">post #{{ d.post_id }}{% if d.post.author_id %} · author {{ d.post.author_id }}{% endif %}</div>
+  </td>
+  <td class="td-hub">
+    {% if d.hub %}
+    <div class="strong small" title="{{ d.hub.label }}">{{ d.hub.label[:40] + '…' if d.hub.label|length > 40 else d.hub.label }}</div>
+    <div class="muted tiny">#{{ d.hub.event_id }}{% if d.hub.discourse_type %} · {{ d.hub.discourse_type }}{% endif %}{% if d.hub.member_count is not none %} · {{ d.hub.member_count }} members{% endif %}</div>
+    {% else %}<span class="muted">—</span>{% endif %}
+  </td>
+  <td class="muted tiny">{{ d.policy_version }}<br>{{ d.model_version }}</td>
+  <td class="td-detail">
+    <button class="row-expand" type="button" aria-expanded="false" aria-label="show decision details">▸</button>
+  </td>
+</tr>
+<tr class="dec-detail" hidden>
+  <td colspan="8">
+    <dl class="dec-detail-grid">
+      <div><dt>confidence</dt><dd>{{ "%.4f"|format(d.confidence) if d.confidence is not none else '—' }}</dd></div>
+      <div><dt>threshold</dt><dd>{{ "%.4f"|format(d.threshold_used) if d.threshold_used is not none else '—' }}</dd></div>
+      <div><dt>margin</dt><dd>{{ "%.4f"|format(d.margin_budget) if d.margin_budget is not none else '—' }}</dd></div>
+      <div><dt>created</dt><dd>{{ d.created_at.isoformat() if d.created_at else '—' }}</dd></div>
+    </dl>
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="8" class="muted">No decisions match the current filters.</td></tr>
+{% endfor %}
+{% if has_more and decided %}
+<tr class="load-row" id="decision-more"
+    hx-get="/admin/decisions?window={{ window }}&amp;status={{ status }}&amp;sort={{ sort }}&amp;offset={{ next_offset }}&amp;partial=1{% if post_id %}&amp;post_id={{ post_id }}{% endif %}{% if hub_id %}&amp;hub_id={{ hub_id }}{% endif %}"
+    hx-target="#decision-rows" hx-swap="beforeend" hx-trigger="intersect once">
+  <td colspan="8" class="load-cell">loading more decisions…</td>
+</tr>
+{% endif %}

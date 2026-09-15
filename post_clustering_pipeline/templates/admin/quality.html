@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="metric-row">
+  <div class="metric-card metric-policy">
+    <span class="metric-label">Policy</span>
+    <span class="metric-value">{{ pv }}</span>
+  </div>
+  <div class="metric-card metric-embedding">
+    <span class="metric-label">Embedding</span>
+    <span class="metric-value">{{ mv }}</span>
+  </div>
+  <div class="metric-card metric-threshold">
+    <span class="metric-label">Threshold</span>
+    <span class="metric-value">{{ "%.4f"|format(threshold) }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">DLQ failed events</span>
+    <span class="metric-value">{{ dlq }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Stuck processing</span>
+    <span class="metric-value">{{ stuck }}</span>
+  </div>
+</div>
+
+<section class="desk-network">
+  <h2 class="visually-hidden">Live hub network</h2>
+  {% include "network.html" %}
+</section>
+
+<div class="page-head">
+  <h2>Rollups</h2>
+</div>
+
+<form class="filter-bar" hx-get="/admin/quality" hx-target="#quality-rollups" hx-swap="outerHTML"
+      hx-trigger="submit, change from:select">
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <label class="filter-field">Rollup windows
+    <select name="windows">
+      {% for w in [7, 14, 30, 60] %}
+      <option value="{{ w }}" {{ 'selected' if window_sel == w }}>{{ w }} windows</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="filter-field">Source
+    <select name="source">
+      <option value="" {{ 'selected' if not source }}>all</option>
+      {% for s in sources %}
+      <option value="{{ s }}" {{ 'selected' if source == s }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button class="btn" type="submit">Apply</button>
+  <a class="btn ghost" href="/admin/quality">clear</a>
+</form>
+
+{% include "quality_rollups.html" %}
+
+<h2>Recent policy changes</h2>
+{% if history %}
+<table class="tbl">
+  <thead><tr><th>version</th><th>knob</th><th>old → new</th><th>status</th><th>source</th><th>actor</th><th>rationale</th></tr></thead>
+  <tbody>
+    {% for h in history %}
+    <tr>
+      <td>{{ h.policy_version }}</td>
+      <td>{{ h.knob }}</td>
+      <td>{{ h.old_value if h.old_value is not none else '—' }} → {{ h.new_value }}</td>
+      <td><span class="badge {{ 'ok' if h.status == 'applied' else ('warn' if h.status == 'proposed' else 'muted') }}">{{ h.status }}</span></td>
+      <td>{{ h.source }}</td>
+      <td>{{ h.actor }}</td>
+      <td class="muted small">{{ h.rationale or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No calibration changes recorded yet.</p>
+{% endif %}
+
+<script>
+(function () {
+  var form = document.querySelector(".filter-bar");
+  if (!form) return;
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest(".sort-link");
+    if (!a) return;
+    e.preventDefault();
+    var cur = form.querySelector('input[name="sort"]').value;
+    var next = (cur === a.dataset.asc) ? a.dataset.desc : a.dataset.asc;
+    form.querySelector('input[name="sort"]').value = next;
+    htmx.trigger(form, "submit");
+  });
+
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest("button.row-expand");
+    if (!btn) return;
+    var row = btn.closest("tr.dec-row");
+    var detail = row.nextElementSibling;
+    var open = detail && detail.classList.contains("dec-detail") && !detail.hidden;
+    if (open) {
+      detail.hidden = true;
+      row.classList.remove("expanded");
+      btn.setAttribute("aria-expanded", "false");
+    } else if (detail && detail.classList.contains("dec-detail")) {
+      detail.hidden = false;
+      row.classList.add("expanded");
+      btn.setAttribute("aria-expanded", "true");
+    }
+  });
+})();
+</script>
+{% endblock %}

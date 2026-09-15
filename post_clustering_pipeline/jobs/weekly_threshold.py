@@ -38,7 +38,7 @@ def optimize_threshold():
             cost = (fp * 5.0) + (fn * 1.0)
             return cost
 
-        res = gp_minimize(objective, [Real(0.75, 0.95)], n_calls=25, random_state=42)
+        res = gp_minimize(objective, [Real(0.40, 0.95)], n_calls=25, random_state=42)
         optimal_threshold = round(float(res.x[0]), 3)
 
         cur.execute(

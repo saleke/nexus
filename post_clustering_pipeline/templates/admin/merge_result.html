@@ -1,0 +1,14 @@
+{# result fragment after a merge action #}
+{% if error %}
+<p class="alert">{{ error }}</p>
+{% else %}
+<div class="alert ok">
+  <b>Merged.</b>
+  <span class="strong">{{ result.source.label }}</span>
+  ({{ result.source.member_count|default(0) - result.moved_posts }} → moved {{ result.moved_posts }} posts)
+  <b>into</b>
+  <span class="strong">{{ result.target.label }}</span>
+  (now {{ result.target.member_count|default(0) }} members, {{ result.target.discourse_type }}).
+  <span class="muted small">merge reopens on the Merge log tab · event.merged sent to subscribers · id {{ result.merge_id }}</span>
+</div>
+{% endif %}

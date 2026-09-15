@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>Settings</h1></div>
+
+<nav class="settings-nav" id="settings-nav" aria-label="Settings sections">
+  <a href="#security"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.7-7 9-4-1.3-7-4.5-7-9V6z"/><path d="M9 12.5l2 2 4-4.5"/></svg>Security</a>
+  <a href="#admins"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5 6.5-5s5.7 1.5 6.5 5"/><path d="M16.5 5.5a3.5 3.5 0 0 1 0 5.5M20 20c-.5-2.5-2-4-4-4.3"/></svg>Admins</a>
+  <a href="#integration"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Integration</a>
+  <a href="#endpoints"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 6l6 6-6 6"/></svg>Endpoints</a>
+  <a href="#delivery"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12l-4-4v3H9v2h9v3z"/><path d="M2 8l4 4-4 4"/></svg>Event delivery</a>
+  <a href="#calibration"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h4m4 0h8M4 16h8m4 0h4"/><circle cx="12" cy="8" r="2"/><circle cx="16" cy="16" r="2"/></svg>Calibration</a>
+  <a href="#environment"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Environment</a>
+</nav>
+
+<h2 id="security">Security</h2>
+<div class="frag-card">
+  <div class="settings-row">
+    <div>
+      <div class="strong">Signed in as</div>
+      <div class="muted small">{{ current_admin.email }}</div>
+    </div>
+    <span class="badge ok">session active</span>
+  </div>
+  <div class="settings-row">
+    <div>
+      <div class="strong">Account recovery</div>
+      <div class="muted small">Google Authenticator TOTP used to unlock this account.</div>
+    </div>
+    <div>
+      {% if current_admin.totp_enabled %}
+      <span class="badge ok">enabled</span>
+      <button class="btn ghost small" hx-post="/admin/settings/enroll-totp"
+              hx-target="#totp-enroll-out" hx-swap="innerHTML">re-enroll</button>
+      {% else %}
+      <span class="badge warn">disabled</span>
+      <button class="btn small" hx-post="/admin/settings/enroll-totp"
+              hx-target="#totp-enroll-out" hx-swap="innerHTML">enroll now</button>
+      {% endif %}
+    </div>
+  </div>
+  <div id="totp-enroll-out"></div>
+
+  <h4 class="frag-title">Change username</h4>
+  <form class="inline-form" hx-post="/admin/settings/change-username" hx-target="#security-out"
+        hx-swap="innerHTML">
+    <input type="email" name="email" placeholder="new username (email)" required>
+    <button class="btn small" type="submit">Update</button>
+  </form>
+
+  <h4 class="frag-title">Change password</h4>
+  <form class="inline-form" hx-post="/admin/settings/change-password" hx-target="#security-out"
+        hx-swap="innerHTML">
+    <input type="password" name="password" placeholder="new password (min 10)" minlength="10" required>
+    <input type="password" name="confirm" placeholder="repeat new password" minlength="10" required>
+    <button class="btn small" type="submit">Update</button>
+  </form>
+  <div id="security-out"></div>
+</div>
+
+<h2 id="admins">Admins</h2>
+<div class="frag-card">
+  {% include "admins_panel.html" %}
+</div>
+
+<h2 id="integration">Social platform integration</h2>
+<div class="frag-card">
+  <div class="settings-row">
+    <div>
+      <div class="strong">Consumer tokens</div>
+      <div class="muted small">Per-party bearer credentials for ingest + events; created on the <a href="/admin/ops">Ops page</a>, revocable, rate-limited per minute.</div>
+    </div>
+    <span class="badge {{ 'ok' if c_tokens else 'muted' }}">{{ c_active }}/{{ c_tokens }} active</span>
+  </div>
+
+  {% if consumers %}
+  <table class="tbl compact">
+    <thead><tr><th>name</th><th>consumer_id</th><th>rate/min</th><th>status</th><th>last used</th></tr></thead>
+    <tbody>
+      {% for c in consumers %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td><code>{{ c.consumer_id }}</code></td>
+        <td>{{ c.rate_limit_per_minute }}</td>
+        <td><span class="badge {{ 'ok' if c.is_active else 'muted' }}">{{ 'active' if c.is_active else 'disabled' }}</span></td>
+        <td class="muted small">{{ c.last_used_at.strftime('%Y-%m-%d %H:%M') if c.last_used_at else 'never' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No consumer tokens yet — create one on the <a href="/admin/ops">Ops page</a>.</p>
+  {% endif %}
+</div>
+
+<h2 id="endpoints">Endpoint contract</h2>
+<div class="frag-card">
+  <div class="settings-row">
+    <div>
+      <div class="strong">How a social platform calls this control plane</div>
+      <div class="muted small">Authenticate every call with <code>Authorization: Bearer &lt;consumer token&gt;</code>. Full request/response shapes and error codes live in the interactive <a href="/docs" target="_blank" rel="noopener">API docs (Swagger UI)</a>.</div>
+    </div>
+  </div>
+  <div class="method-row">
+    <div class="method-cell">
+      <div class="method"><span class="method-badge method-post">POST</span> <code>/posts/batch</code></div>
+      <div class="method-desc">Ingest posts in bulk.</div>
+      <div class="method-note">JSON body: <code>post_id</code>, <code>content</code>, <code>user_id</code>, <code>created_at</code></div>
+    </div>
+    <div class="method-cell">
+      <div class="method"><span class="method-badge method-get">GET</span> <code>/integration/events</code></div>
+      <div class="method-desc">Pull clustered-update events (lease-locked batch).</div>
+      <div class="method-note">Query: <code>limit</code>, <code>after</code>; echo <code>lease_token</code> to ack</div>
+    </div>
+    <div class="method-cell">
+      <div class="method"><span class="method-badge method-post">POST</span> <code>/integration/events/{id}/ack</code></div>
+      <div class="method-desc">Acknowledge a delivered event.</div>
+      <div class="method-note">Query: <code>lease_token</code></div>
+    </div>
+    <div class="method-cell">
+      <div class="method"><span class="method-badge method-get">GET</span> <code>/health/live</code><span class="sep">/</span><code>/health/ready</code></div>
+      <div class="method-desc">Public liveness / readiness probes.</div>
+      <div class="method-note">No auth required</div>
+    </div>
+  </div>
+</div>
+
+<h2 id="delivery">Event delivery</h2>
+<div class="frag-card">
+  <div class="settings-row">
+    <div>
+      <div class="strong">Mode</div>
+      <div class="muted small">How delivery to the platform happens; set via <code>EVENT_DELIVERY_MODE</code>.</div>
+    </div>
+    {% if delivery.mode == 'polling' %}
+    <span class="badge neutral">polling — clients pull /integration/events</span>
+    {% else %}
+    <span class="badge warn">push enabled</span>
+    {% endif %}
+  </div>
+  <div class="settings-row">
+    <div>
+      <div class="strong">Webhook URL</div>
+      <div class="muted small">Push destination; set via <code>EVENT_WEBHOOK_URL</code>.</div>
+    </div>
+    {% if delivery.url %}
+    <code>{{ delivery.url }}</code>
+    {% else %}
+    <span class="muted">not configured</span>
+    {% endif %}
+  </div>
+  <div class="settings-row">
+    <div>
+      <div class="strong">Payload signature</div>
+      <div class="muted small">HMAC-SHA256 sign each push; set via <code>EVENT_WEBHOOK_SIGNING_SECRET</code>.</div>
+    </div>
+    {% if delivery.signing %}
+    <span class="badge ok">HMAC-SHA256 — X-Nexus-Signature</span>
+    {% else %}
+    <span class="badge warn">unsigned payloads</span>
+    {% endif %}
+  </div>
+  <p class="muted tiny">Env-backed values; changes require a restart.</p>
+</div>
+
+<h2 id="calibration">Calibration</h2>
+<div class="frag-card">
+  <div class="settings-row">
+    <div>
+      <div class="strong">Assignment policy</div>
+      <div class="muted small">Stored in <code>system_config</code>; applied by the running process immediately. Tune live on the <a href="/admin/calibration">Calibration page</a>.</div>
+    </div>
+    <span class="badge ok">live, no restart</span>
+  </div>
+</div>
+<div class="frag-card">
+  <h4 class="frag-title">Knobs</h4>
+  <table class="tbl compact">
+    <thead><tr><th>knob</th><th>current</th><th>range</th><th>warning</th></tr></thead>
+    <tbody>
+      {% for k in knobs %}
+      <tr>
+        <td><code>{{ k.name }}</code></td>
+        <td class="strong">{{ k.current_disp or '—' }}</td>
+        <td class="muted small">{{ k.lo }} – {{ k.hi }}</td>
+        <td>
+          {% if k.warning %}
+          <span class="badge warn">performance-affecting</span>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2 id="environment">Environment knobs</h2>
+<div class="frag-card env-card">
+  <div class="env-banner" role="note">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="16" r="1.4"/></svg>
+    <div>
+      <span class="env-banner-title">Read-only — change these in the deployment environment and restart.</span>
+      <span class="env-banner-sub">The running process reads them once at boot. Editing here in the panel would be ignored, and a restart would overwrite it.</span>
+    </div>
+    <span class="badge neutral env-badge">read-only</span>
+  </div>
+
+  <div class="env-toolbar">
+    <label class="env-search">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input type="search" id="env-q" placeholder="Filter knob name…" autocomplete="off" aria-label="Filter knobs by name">
+    </label>
+    <label class="env-group">
+      <span>Group</span>
+      <select id="env-group" aria-label="Filter knobs by group">
+        <option value="all">all groups</option>
+        {% for s in env_sections %}<option value="{{ s.code }}">{{ s.label }}</option>{% endfor %}
+      </select>
+    </label>
+    <span class="env-count">{{ env_counts.total }} knobs · {{ env_counts.env_set }} set via env · {{ env_counts.secrets }} secrets</span>
+  </div>
+
+  {% for s in env_sections %}
+  <section class="env-section" data-env-section="{{ s.code }}">
+    <h4 class="frag-title">{% if s.code != 'other' %}{{ s.label }}{% else %}Other{% endif %}</h4>
+    <table class="tbl compact env-table">
+      <thead><tr><th>name</th><th>value</th><th>kind</th><th>source</th></tr></thead>
+      <tbody>
+        {% for k in s.knobs %}
+        <tr data-env-row="{{ k.name }}" data-env-group="{{ s.code }}">
+          <td><code>{{ k.name }}</code></td>
+          <td class="env-value">
+            {% if k.value == '' %}<span class="muted">—</span>
+            {% elif k.sensitive %}<span class="env-secret">••••••••{# value never shown for secrets #}</span>
+            {% else %}<code>{{ k.value | string | truncate(64, true) }}</code>{% endif %}
+          </td>
+          <td><span class="badge neutral">{{ k.kind }}</span></td>
+          <td>{% if k.env_set %}<span class="badge ok">env set</span>{% else %}<span class="muted">default</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  <p class="env-empty" id="env-empty" hidden>No knobs match the current filter.</p>
+</div>
+
+<script>
+(function () {
+  // Row expansion: toggle an admin's detail block. Delegated at document level
+  // so it also works on rows htmx swaps in later.
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest("button.row-expand");
+    if (!btn) return;
+    var row = btn.closest("tr.dec-row");
+    var detail = row.nextElementSibling;
+    var open = detail && detail.classList.contains("dec-detail") && !detail.hidden;
+    if (open) {
+      detail.hidden = true;
+      row.classList.remove("expanded");
+      btn.setAttribute("aria-expanded", "false");
+    } else if (detail && detail.classList.contains("dec-detail")) {
+      detail.hidden = false;
+      row.classList.add("expanded");
+      btn.setAttribute("aria-expanded", "true");
+    }
+  });
+
+  // Env knob filter: rows hide by name + group; empty groups collapse.
+  var q = document.getElementById("env-q");
+  var group = document.getElementById("env-group");
+  if (q && group) {
+    var emptyState = document.getElementById("env-empty");
+    function apply() {
+      var needle = q.value.trim().toLowerCase();
+      var g = group.value;
+      var anyVisible = false;
+      document.querySelectorAll("[data-env-section]").forEach(function (sec) {
+        var code = sec.getAttribute("data-env-section");
+        var secVisible = false;
+        sec.querySelectorAll("[data-env-row]").forEach(function (tr) {
+          if (g !== "all" && tr.getAttribute("data-env-group") !== g) {
+            tr.hidden = true; return;
+          }
+          var hidden = needle && tr.getAttribute("data-env-row").toLowerCase().indexOf(needle) === -1;
+          tr.hidden = hidden;
+          if (!hidden) secVisible = true;
+        });
+        sec.hidden = !secVisible;
+        if (secVisible) anyVisible = true;
+      });
+      if (emptyState) emptyState.hidden = anyVisible;
+    }
+    q.addEventListener("input", apply);
+    group.addEventListener("change", apply);
+    apply();
+  }
+
+  // Scroll-spy: highlight the settings-nav entry for the section on screen.
+  var nav = document.getElementById("settings-nav");
+  if (nav) {
+    var links = Array.prototype.slice.call(nav.querySelectorAll("a"));
+    var targets = links
+      .map(function (a) { return document.querySelector(a.getAttribute("href")); })
+      .filter(Boolean);
+    if ("IntersectionObserver" in window && targets.length) {
+      var sectionIds = {};
+      targets.forEach(function (el) { sectionIds[el.id] = el; });
+      var activeId = null;
+      var io = new IntersectionObserver(function (entries) {
+        var best = null, bestTop = 1e9;
+        entries.forEach(function (e) {
+          if (!e.isIntersecting) return;
+          var top = e.boundingClientRect.top;
+          if (top >= 0 && top < bestTop) { bestTop = top; best = e.target.id; }
+        });
+        if (best && best !== activeId) {
+          activeId = best;
+          links.forEach(function (a) {
+            a.classList.toggle("active", a.getAttribute("href") === "#" + best);
+          });
+        }
+      }, { rootMargin: "-64px 0px -70% 0px" });
+      targets.forEach(function (el) { io.observe(el); });
+    }
+  }
+})();
+</script>
+{% endblock %}

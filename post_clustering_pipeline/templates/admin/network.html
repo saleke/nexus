@@ -1,0 +1,166 @@
+<section class="network-wrap" id="nexus-network-container" aria-label="Hub network visualization">
+    <canvas id="nexus-network"></canvas>
+    <div class="net-status"><span class="dot" aria-hidden="true"></span>hub network · static</div>
+    <div class="net-legend">
+        <span><i class="l-dot l-core"></i>core hub</span>
+        <span><i class="l-dot l-member"></i>member</span>
+        <span><i class="l-dot l-assoc"></i>related</span>
+        <span><i class="l-line"></i>similarity link</span>
+    </div>
+</section>
+<style>
+    /* Theme the console surface to the panel instead of standalone dark blue. */
+    .network-wrap {
+        --net-bg: radial-gradient(120% 120% at 50% 20%, #0b1220 0%, #06090f 70%);
+        background: var(--net-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        height: calc(100vh - 250px);
+        min-height: 320px;
+        max-height: 560px;
+        margin: 0 0 var(--space-3);
+    }
+    .net-legend .l-dot {
+        display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    }
+    .net-legend .l-core { background: #58a6ff; box-shadow: 0 0 6px #58a6ff; }
+    .net-legend .l-member { background: #00d2ff; }
+    .net-legend .l-assoc { background: #264b7d; }
+    .net-legend .l-line {
+        display: inline-block; width: 14px; height: 2px;
+        background: rgba(88, 166, 255, .5);
+    }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+    "use strict";
+
+    const container = document.getElementById("nexus-network-container");
+    const canvas = document.getElementById("nexus-network");
+    if (!container || !canvas) return;
+
+    let boxW = container.clientWidth || 640;
+    let boxH = container.clientHeight || 440;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, boxW / boxH, 0.1, 1000);
+    camera.position.set(0, 0, 30);
+
+    const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+    renderer.setSize(boxW, boxH);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    const pointLight = new THREE.PointLight(0x00ffff, 2, 100);
+    pointLight.position.set(0, 0, 10);
+    scene.add(pointLight);
+
+    const nodes = [];
+    const nodeGroup = new THREE.Group();
+    scene.add(nodeGroup);
+
+    const coreGeo = new THREE.SphereGeometry(1.2, 32, 32);
+    const ringGeo = new THREE.SphereGeometry(0.42, 20, 20);
+    const outerGeo = new THREE.SphereGeometry(0.26, 16, 16);
+
+    const coreMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff });
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00d2ff });
+    const outerMat = new THREE.MeshBasicMaterial({ color: 0x264b7d });
+
+    const centerNode = new THREE.Mesh(coreGeo, coreMat);
+    centerNode.position.set(0, 0, 0);
+    nodeGroup.add(centerNode);
+    nodes.push({ mesh: centerNode, targetPos: new THREE.Vector3(0, 0, 0), speed: 0 });
+
+    const ringCount = 8;
+    const ringRadius = 5.5;
+    for (let i = 0; i < ringCount; i++) {
+        const mesh = new THREE.Mesh(ringGeo, ringMat);
+        const angle = (i / ringCount) * Math.PI * 2;
+        const pos = new THREE.Vector3(Math.cos(angle) * ringRadius, Math.sin(angle) * ringRadius, 0);
+        mesh.position.copy(pos);
+        nodeGroup.add(mesh);
+        nodes.push({ mesh: mesh, targetPos: pos.clone(), speed: 0.5 + Math.random() });
+    }
+
+    const outerCount = 48;
+    for (let i = 0; i < outerCount; i++) {
+        const mesh = new THREE.Mesh(outerGeo, outerMat);
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 9.5 + Math.random() * 13;
+        const pos = new THREE.Vector3(
+            Math.cos(angle) * radius,
+            Math.sin(angle) * radius,
+            (Math.random() - 0.5) * 8
+        );
+        mesh.position.copy(pos);
+        nodeGroup.add(mesh);
+        nodes.push({ mesh: mesh, targetPos: pos.clone(), speed: 1.0 + Math.random() * 1.5 });
+    }
+
+    const linesGeo = new THREE.BufferGeometry();
+    const lineCount = 140;
+    const positions = new Float32Array(lineCount * 6);
+    linesGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    const lineMat = new THREE.LineBasicMaterial({
+        color: 0x58a6ff,
+        transparent: true,
+        opacity: 0.3,
+        blending: THREE.AdditiveBlending
+    });
+
+    const networkLines = new THREE.LineSegments(linesGeo, lineMat);
+    scene.add(networkLines);
+
+    const linePairs = [];
+    for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+            const d = nodes[i].targetPos.distanceTo(nodes[j].targetPos);
+            if (i === 0 && j <= ringCount) {
+                linePairs.push({ a: i, b: j });
+            } else if (i > 0 && i <= ringCount && j <= ringCount && d < ringRadius * 1.5) {
+                linePairs.push({ a: i, b: j });
+            } else if (d > 4 && d < 9 && linePairs.length < lineCount) {
+                linePairs.push({ a: i, b: j });
+            }
+        }
+    }
+
+    // Static render: nodes and links fixed at their composed positions.
+    function renderStatic() {
+        for (let i = 1; i < nodes.length; i++) {
+            nodes[i].mesh.position.copy(nodes[i].targetPos);
+        }
+        const posAttr = networkLines.geometry.attributes.position.array;
+        let index = 0;
+        for (let i = 0; i < linePairs.length; i++) {
+            const pA = nodes[linePairs[i].a].mesh.position;
+            const pB = nodes[linePairs[i].b].mesh.position;
+            posAttr[index++] = pA.x; posAttr[index++] = pA.y; posAttr[index++] = pA.z;
+            posAttr[index++] = pB.x; posAttr[index++] = pB.y; posAttr[index++] = pB.z;
+        }
+        networkLines.geometry.attributes.position.needsUpdate = true;
+        camera.lookAt(0, 0, 0);
+        renderer.render(scene, camera);
+    }
+
+    function resize() {
+        boxW = container.clientWidth || 640;
+        boxH = container.clientHeight || 440;
+        camera.aspect = boxW / boxH;
+        camera.updateProjectionMatrix();
+        renderer.setSize(boxW, boxH);
+        renderStatic();
+    }
+
+    if (window.ResizeObserver) {
+        new ResizeObserver(resize).observe(container);
+    }
+    window.addEventListener("resize", resize);
+
+    resize();
+})();
+</script>

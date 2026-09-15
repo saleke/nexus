@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>Ops</h1></div>
+
+<div class="metric-row">
+  <div class="metric-card">
+    <span class="metric-label">Redis broker</span>
+    <span class="metric-value">{{ redis_state }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Celery queue</span>
+    <span class="metric-value">{{ queue_len if queue_len is not none else '—' }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">DLQ failed events</span>
+    <span class="metric-value">{{ dlq }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Leased in-flight</span>
+    <span class="metric-value">{{ leased }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Stuck processing (&gt;5m)</span>
+    <span class="metric-value">{{ stuck }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Stalled pending (&gt;15m)</span>
+    <span class="metric-value">{{ stalled_pending }}</span>
+  </div>
+</div>
+
+<section class="card">
+  <h2>Rollup freshness</h2>
+  {% if last_rollup %}
+  <span class="badge {{ 'ok' if rollup_fresh else 'warn' }}">{{ 'fresh' if rollup_fresh else 'stale' }}</span>
+  last human-graded rollup window ended {{ last_rollup }}.
+  {% else %}
+  <p class="muted">No rollups yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Recovery actions</h2>
+  <div class="card-row">
+    <button class="btn" hx-post="/admin/ops/resume-stuck" hx-target="#op-result"
+            hx-confirm="Return all stuck 'processing' posts to 'pending'? They will be re-claimed.">Resume stuck posts</button>
+    <button class="btn" hx-post="/admin/ops/retry-dlq" hx-target="#op-result"
+            hx-confirm="Re-queue all DLQ events (reset attempts to 0)? Only do this after fixing the consumer.">Re-queue DLQ</button>
+  </div>
+  <div id="op-result"></div>
+</section>
+
+<section class="card">
+  <h2>API consumers (pull)</h2>
+  {% if consumers %}
+  <table class="tbl compact">
+    <thead><tr><th>consumer_id</th><th>rate/min</th><th>active</th><th>last used</th><th></th></tr></thead>
+    <tbody>
+      {% for c in consumers %}
+      <tr id="consumer-{{ c.consumer_id }}">
+        <td>{{ c.consumer_id }}</td>
+        <td>{{ c.rate_limit_per_minute }}</td>
+        <td><span class="badge {{ 'ok' if c.is_active else 'muted' }}">{{ 'active' if c.is_active else 'disabled' }}</span></td>
+        <td class="muted small">{{ c.last_used_at.strftime('%Y-%m-%d %H:%M') if c.last_used_at else 'never' }}</td>
+        <td><button class="btn danger small" hx-post="/admin/consumers/{{ c.consumer_id }}/delete"
+                    hx-target="#consumer-{{ c.consumer_id }}" hx-swap="outerHTML"
+                    hx-confirm="Delete this API consumer permanently? Its token stops working immediately and cannot be recovered.">delete</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No API consumers registered yet.</p>
+  {% endif %}
+  <form hx-post="/admin/consumers" hx-target="#consumer-result" class="inline-form">
+    <input name="name" placeholder="consumer name (e.g. ops-frontend)" required>
+    <input name="rate_limit_per_minute" type="number" value="60" min="1" max="10000">
+    <button class="btn">Add consumer</button>
+  </form>
+  <div id="consumer-result"></div>
+</section>
+{% endblock %}

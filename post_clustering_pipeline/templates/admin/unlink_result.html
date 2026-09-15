@@ -1,0 +1,12 @@
+{% if error %}
+<p class="alert danger">{{ error }}</p>
+{% else %}
+<div class="alert ok">
+  <b>Unlinked.</b>
+  <span class="strong">{{ result.post.content_preview or ('post #' ~ result.post_id) }}</span>
+  (author {{ result.post.author_id }}) removed from
+  <span class="strong">{{ result.hub.label }}</span> ({{ result.hub.discourse_type }}, {{ result.hub.member_count }} members).
+  It is now <b>candidate</b>. Feedback tagged {{ result.post.status }} / user_removed · post.unlinked event sent.
+  {% if result.was_redirected %}<span class="muted small">hub reference redirected to canonical hub {{ result.event_id }}.</span>{% endif %}
+</div>
+{% endif %}

@@ -1,0 +1,60 @@
+{# HTMX fragment: labeled cards for one picker, gated by kind + optional slot.
+   kind=hub -> "use as source/target" buttons writing hidden fields into the
+   desk's merge form (slot='' default), or a single "use as target" button
+   writing a plain `event_id` input into the confirm form (slot='confirm').
+   kind=post -> "select" writes post_id into the unlink/confirm forms.
+   Everything a human reads is CONTENT; ids stay subtext. #}
+{% if q == '' or not q %}
+<p class="search-hint">Type a remembered fragment — a phrase, a user, an id.</p>
+{% elif kind == 'hub' and found.hubs %}
+<div class="frag-list">
+  {% for h in found.hubs %}
+  <div class="frag-card">
+    <div class="strong">{{ h.label }}</div>
+    <div class="meta muted">{{ h.discourse_type }} · {{ h.member_count }} members
+      {% if h.member_previews %} · sample: {{ h.member_previews|join(' / ') }}{% endif %}
+      <span class="id-hint">id {{ h.event_id }}</span>
+    </div>
+    <div class="btn-row">
+      {% if slot == 'confirm' %}
+      <button class="btn small ghost" hx-post="/admin/pick"
+              hx-vals='{"role":"target","event_id":{{ h.event_id }},"name":"event_id","picker":"confirm-target-picker"}'
+              hx-target="#picked-confirm-target">pin posts into this hub</button>
+      {% else %}
+      <button class="btn small ghost" hx-post="/admin/pick"
+              hx-vals='{"role":"source","event_id":{{ h.event_id }},"picker":"source-picker"}'
+              hx-target="#picked-source">use as source</button>
+      <button class="btn small ghost" hx-post="/admin/pick"
+              hx-vals='{"role":"target","event_id":{{ h.event_id }},"picker":"target-picker"}'
+              hx-target="#picked-target">use as target</button>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% elif kind == 'post' and found.posts %}
+<div class="frag-list">
+  {% for p in found.posts %}
+  <div class="frag-card">
+    <div class="strong small">{{ p.content_preview or ('post #' ~ p.post_id) }}</div>
+    <div class="meta muted">post #{{ p.post_id }} · author {{ p.author_id }} · {{ p.status }}
+      {% if p.event_id %} · in hub id {{ p.event_id }}{% endif %}
+      <span class="id-hint">id {{ p.post_id }}</span>
+    </div>
+    <div class="btn-row">
+      {% if slot == 'confirm' %}
+      <button class="btn small ghost" hx-post="/admin/pick-post"
+              hx-vals='{"post_id":{{ p.post_id }},"picker":"confirm-post-picker"}'
+              hx-target="#picked-confirm-post">confirm this post</button>
+      {% else %}
+      <button class="btn small ghost" hx-post="/admin/pick-post"
+              hx-vals='{"post_id":{{ p.post_id }},"picker":"post-picker"}'
+              hx-target="#picked-post">select post</button>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="search-hint">Nothing matched “{{ q }}”.</p>
+{% endif %}

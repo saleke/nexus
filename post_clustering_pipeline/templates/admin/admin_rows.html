@@ -1,0 +1,52 @@
+{% for a in admins %}
+<tr class="dec-row">
+  <td>{{ a.email }}{% if a.id == my_admin_id %} <span class="muted tiny">(you)</span>{% endif %}</td>
+  <td>{% if a.totp_enabled %}<span class="badge ok">on</span>{% else %}<span class="badge">off</span>{% endif %}</td>
+  <td>{% if a.is_active %}<span class="badge ok">active</span>{% else %}<span class="badge danger">disabled</span>{% endif %}</td>
+  <td class="td-actions">
+    {% if a.id != my_admin_id %}
+    <span class="row-actions">
+      <form class="inline-form" hx-post="/admin/settings/admins/{{ a.id }}/active"
+            hx-target="#admins-panel" hx-swap="outerHTML">
+        <input type="hidden" name="q" value="{{ search }}">
+        <input type="hidden" name="status" value="{{ status }}">
+        <input type="hidden" name="offset" value="{{ offset }}">
+        {% if a.is_active %}
+        <input type="hidden" name="active" value="0">
+        <button class="btn ghost small" type="submit">disable</button>
+        {% else %}
+        <input type="hidden" name="active" value="1">
+        <button class="btn small" type="submit">enable</button>
+        {% endif %}
+      </form>
+      <form class="inline-form" hx-post="/admin/settings/admins/{{ a.id }}/delete"
+            hx-target="#admins-panel" hx-swap="outerHTML"
+            hx-confirm="Permanently delete {{ a.email }}? They lose access immediately and this cannot be undone.">
+        <input type="hidden" name="q" value="{{ search }}">
+        <input type="hidden" name="status" value="{{ status }}">
+        <input type="hidden" name="offset" value="{{ offset }}">
+        <button class="btn danger small" type="submit">delete</button>
+      </form>
+    </span>
+    {% else %}
+    <span class="muted tiny">—</span>
+    {% endif %}
+  </td>
+  <td class="td-detail"><button class="row-expand" type="button" aria-expanded="false" aria-label="show admin details">&#9662;</button></td>
+</tr>
+<tr class="dec-detail" hidden>
+  <td colspan="5">
+    <div class="dec-detail-grid">
+      <div><span class="muted">created</span><b>{{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '—' }}</b></div>
+      <div><span class="muted">last login</span><b>{{ a.last_login_at.strftime('%Y-%m-%d %H:%M') if a.last_login_at else 'never' }}</b></div>
+    </div>
+  </td>
+</tr>
+{% endfor %}
+{% if has_more %}
+<tr class="load-row" id="admin-more"
+    hx-get="/admin/settings/admins?partial=1&amp;q={{ search }}&amp;status={{ status }}&amp;limit={{ limit }}&amp;offset={{ next_offset }}"
+    hx-target="#admin-rows" hx-swap="beforeend" hx-trigger="intersect once">
+  <td colspan="5" class="muted">loading more admins…</td>
+</tr>
+{% endif %}

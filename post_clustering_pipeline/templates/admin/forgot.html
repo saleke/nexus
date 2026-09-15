@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus Control — forgot password</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=19">
+</head>
+<body class="auth-body">
+<main class="auth-shell">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <svg class="bolt" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
+        <path d="M34 6 L14 38 L28 38 L23 58 L50 26 L35 26 Z" fill="#ffd42a"/>
+      </svg>
+      <span class="auth-title">Recover access</span>
+    </div>
+
+    {% if error %}
+    <div class="alert danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    {% if step == "otp" %}
+    <p class="muted small">
+      Enter the current 6-digit code from your Google Authenticator app for
+      <span class="strong">{{ email }}</span>. The code expires in 30&nbsp;s and you
+      get a short window to type a new password afterwards.
+    </p>
+    <form class="auth-form" method="post" action="/admin/forgot" autocomplete="off">
+      <label>One-time code
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+               placeholder="6-digit code" required autofocus>
+      </label>
+      <input type="hidden" name="email" value="{{ email }}">
+      <button class="btn" type="submit">Verify & reset</button>
+    </form>
+    <p class="muted small">
+      <a href="/admin/login">Back to login</a>
+    </p>
+    {% else %}
+    <p class="muted small">
+      Recommended: <a href="/admin/login/google">sign in with Google</a> — Google
+      handles account recovery for you and no codes are needed.
+    </p>
+    <p class="muted small">
+      Otherwise enter your email and verify with the Google Authenticator code bound
+      to that account before allowing a password reset.
+    </p>
+    <form class="auth-form" method="post" action="/admin/forgot" autocomplete="off">
+      <label>Email <input type="email" name="email" required autofocus></label>
+      <button class="btn" type="submit">Request reset</button>
+    </form>
+    <p class="muted small"><a href="/admin/login">Back to login</a></p>
+    {% endif %}
+  </div>
+</main>
+</body>
+</html>

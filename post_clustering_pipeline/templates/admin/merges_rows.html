@@ -1,0 +1,31 @@
+{% for m in merges %}
+<tr>
+  <td>{{ m.id }}</td>
+  <td class="merge-pair">
+    <div class="strong small">→ {{ m.target.label }}</div>
+    <div class="muted tiny">{{ m.source.discourse_type }} · {{ m.source.member_count }}m → {{ m.target.member_count }}m</div>
+  </td>
+  <td>{{ m.initiated_by }}</td>
+  <td>{{ m.moved }}</td>
+  <td><span class="badge {{ 'ok' if m.status == 'merged' else 'muted' }}">{{ m.status }}</span></td>
+  <td class="muted small">{{ m.opened_note or '' }}</td>
+  <td class="muted tiny">{{ m.created_at }}</td>
+  <td>
+    {% if m.status == 'merged' %}
+    <button class="btn danger small" hx-post="/admin/merge/{{ m.id }}/reopen" hx-target="closest tr"
+            hx-confirm="Reopen this merge? {{ m.source.member_count|default(0)|abs }} posts return to the source hub.">
+      reopen
+    </button>
+    {% endif %}
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="8" class="muted">No merges yet.</td></tr>
+{% endfor %}
+{% if has_more and merges %}
+<tr class="load-row" id="merge-more"
+    hx-get="/admin/merges?offset={{ next_offset }}&amp;partial=1"
+    hx-target="#merge-rows" hx-swap="beforeend" hx-trigger="intersect once">
+  <td colspan="8" class="load-cell">loading more merges…</td>
+</tr>
+{% endif %}

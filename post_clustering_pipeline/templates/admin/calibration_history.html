@@ -1,0 +1,30 @@
+{# Change-history table for the calibration page. Rendered in two places:
+   inline on the page, and out-of-band (hx-swap-oob) after apply/propose/revert
+   so a fresh change (and its revert button) appears without a full reload. #}
+<table class="tbl">
+  <thead><tr><th>id</th><th>version</th><th>knob</th><th>old → new</th><th>status</th><th>source</th><th>actor</th><th>rationale</th><th>at</th><th></th></tr></thead>
+  <tbody>
+    {% for h in history %}
+    <tr>
+      <td>{{ h.id }}</td>
+      <td>{{ h.policy_version }}</td>
+      <td>{{ h.knob }}</td>
+      <td>{{ h.old_value if h.old_value is not none else '—' }} → {{ h.new_value }}</td>
+      <td><span class="badge {{ 'ok' if h.status == 'applied' else ('warn' if h.status == 'proposed' else 'muted') }}">{{ h.status }}</span></td>
+      <td>{{ h.source }}</td>
+      <td>{{ h.actor }}</td>
+      <td class="muted small">{{ h.rationale or '' }}</td>
+      <td class="muted tiny">{{ h.created_at }}</td>
+      <td>
+        {% if h.status == 'applied' and h.old_value is not none %}
+        <button class="btn small" hx-post="/admin/calibration/{{ h.id }}/revert" hx-target="#calib-result-{{ h.knob }}"
+                hx-vals='{"knob": "{{ h.knob }}"}'
+                hx-confirm="Revert to {{ h.old_value }}? This is a performance-affecting change.">revert</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10" class="muted">No changes yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

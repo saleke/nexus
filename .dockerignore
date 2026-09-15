@@ -1,0 +1,9 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+*.jpg
+!post_clustering_pipeline/static/image.jpg
+!image.jpg
+*.png
+.git

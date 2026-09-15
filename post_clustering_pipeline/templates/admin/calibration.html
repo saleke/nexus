@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="metric-row">
+  <div class="metric-card">
+    <span class="metric-label">Policy</span>
+    <span class="metric-value">{{ pv }}</span>
+  </div>
+  <div class="metric-card">
+    <span class="metric-label">Embedding</span>
+    <span class="metric-value">{{ mv }}</span>
+  </div>
+</div>
+
+{% for k in knobs %}
+<section class="card">
+  <div class="knob-head">
+    <div>
+      <h2>{{ k.name }}</h2>
+      <span class="muted small">valid range {{ k.lo }} – {{ k.hi }} ({{ k.decimals }} decimals) · current
+        <span id="cur-{{ k.name }}" class="chip threshold">{{ "%.4f"|format(k.current) if k.current is not none else '—' }}</span></span>
+    </div>
+  </div>
+
+  {% if k.warning %}
+  <div class="alert warn" role="alert">
+    <b>Warning — this setting affects clustering performance.</b>
+    {{ k.warning.warning }}
+    <ul class="small">
+      {% for a in k.warning.affected %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+    {% if k.warning.impact_estimator %}
+    <span class="muted tiny">The apply screen also shows a blast-radius estimate from the decision journal.</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <form hx-post="/admin/calibration/apply" hx-target="#calib-result-{{ k.name }}" class="calib-form">
+    <input type="hidden" name="knob" value="{{ k.name }}">
+    <label>new value <input type="number" name="new_value" step="0.0001" min="{{ k.lo }}" max="{{ k.hi }}" placeholder="{{ '%.4f'|format(k.current or 0) }}" required></label>
+    <label>rationale <input type="text" name="rationale" placeholder="why (surfaces in audit)"></label>
+    <div class="card-row">
+      <button type="submit" class="btn" hx-confirm="Apply this change? It changes assignment behavior immediately. Estimate is shown on the result card." hx-disabled-elt="this">Apply</button>
+      <button type="submit" class="btn ghost" hx-post="/admin/calibration/propose"
+              hx-confirm="Create a proposal instead of applying?" formaction="/admin/calibration/propose" hx-disabled-elt="this">Propose</button>
+    </div>
+  </form>
+  <div id="calib-result-{{ k.name }}"></div>
+</section>
+{% else %}
+<p class="muted">No calibratable knobs registered.</p>
+{% endfor %}
+
+<h2>Change history (revert possible)</h2>
+<div id="calib-history">
+  {% include "calibration_history.html" %}
+</div>
+{% endblock %}

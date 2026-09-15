@@ -4,8 +4,12 @@ import networkx as nx
 import networkx.algorithms.community as nx_comm
 from datetime import datetime, timezone
 
-from ..db import get_db_cursor
+from ..db import get_db_cursor, extract_val
 from ..events import write_outbox
+from ..embed_io import vector_to_array_literal, parse_vector_literal
+from ..centroid import bounded_rolling_centroid, normalize
+from ..refs import title_from_seed, unique_handle
+from ..membership import record_membership
 from ..config import (
     BIRTH_ASSIGN_THRESHOLD,
     BIRTH_SIMILARITY_FLOOR,
@@ -16,7 +20,7 @@ from ..config import (
 
 
 def parse_embedding(emb_text: str) -> np.ndarray:
-    return np.array(list(map(float, emb_text.strip("[]").split(","))))
+    return parse_vector_literal(emb_text)
 
 
 def get_active_centroids(cur):
@@ -124,20 +128,101 @@ def construct_knn_event_graph(rows, k=4, min_similarity_floor=BIRTH_SIMILARITY_F
     return g, post_ids
 
 
+def _entity_split_components(cur, post_ids: list[int]) -> list[list[int]]:
+    """Split a (candidate) community by strong identity entities.
+
+    Embeddings cannot separate confusable actor threads (Apple vs Samsung
+    launch read identically as 'phone launch'); the per-post identity
+    entities captured at ingestion can. Posts are unioned when they share any
+    strong entity; posts with NO strong entity are generic and attach to the
+    largest component (they follow the embedding majority rather than strand).
+    A community that is one entity thread (or no entities at all) returns a
+    single component -> behaviour identical to the pre-split path.
+    """
+    if len(post_ids) <= 1:
+        return [post_ids]
+
+    cur.execute("SELECT id, entities FROM posts WHERE id = ANY(%s);", (post_ids,))
+    ents: dict[int, set[str]] = {}
+    for r in (cur.fetchall() or []):
+        pid = extract_val(r, "id", 0)
+        vals = extract_val(r, "entities", 1) or []
+        strong = {str(v) for v in vals if v}
+        if strong:
+            ents[pid] = strong
+
+    parent = {p: p for p in post_ids}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    entity_to_posts: dict[str, list[int]] = {}
+    for pid, es in ents.items():
+        for e in es:
+            entity_to_posts.setdefault(e, []).append(pid)
+    for pids in entity_to_posts.values():
+        base = pids[0]
+        for p in pids[1:]:
+            union(base, p)
+
+    comps: dict[int, list[int]] = {}
+    for p in post_ids:
+        comps.setdefault(find(p), []).append(p)
+    groups = list(comps.values())
+
+    if len(groups) == 1:
+        return groups
+
+    # Detach ONLY labeled sub-groups with >= 2 members. A 1-member labeled
+    # group is far more likely a single post whose entity string differs from
+    # the community's wording (e.g. "Amazon Web Services" vs "AWS") than a
+    # second real actor, so it must NOT fracture the community.
+    largest = max(groups, key=len)
+    kept = []
+    for g in groups:
+        if g is largest:
+            kept.append(g)
+            continue
+        if all(p not in ents for p in g):
+            largest.extend(g)  # unlabeled/generic posts ride the majority
+        elif len(g) >= 2:
+            kept.append(g)
+        else:
+            largest.extend(g)  # singleton labeled post rides the majority
+    return kept
+
+
 def run_clustering_pipeline():
     with get_db_cursor(commit=True) as cur:
-        # Age out old unclustered posts and prune buffer
+        # Age out old unclustered posts and prune buffer. Every final status is
+        # journaled in the SAME transaction so 'noise' is explainable everywhere.
+        from ..decisions import log_decisions_bulk
+        from ..policy import current_versions
+        pv, mv = current_versions(cur)
         cur.execute(
             """
-            WITH aged AS (
-                UPDATE posts SET assignment_status = 'noise', assignment_updated_at = NOW()
-                WHERE event_id IS NULL AND assignment_status IN ('pending', 'candidate', 'unassigned')
-                  AND created_at < NOW() - INTERVAL '24 hours'
-                RETURNING id
-            )
-            DELETE FROM unclustered_posts_buffer WHERE post_id IN (SELECT id FROM aged);
+            UPDATE posts SET assignment_status = 'noise', assignment_updated_at = NOW()
+            WHERE event_id IS NULL AND assignment_status IN ('pending', 'candidate', 'unassigned')
+              AND created_at < NOW() - INTERVAL '24 hours'
+            RETURNING id;
             """
         )
+        aged_ids = [int(extract_val(r, "id", 0)) for r in (cur.fetchall() or [])]
+        if aged_ids:
+            cur.execute(
+                "DELETE FROM unclustered_posts_buffer WHERE post_id = ANY(%s::int[]);",
+                (aged_ids,)
+            )
+            log_decisions_bulk(cur, [
+                (pid, None, None, None, None, None, "noise", None, pv, mv, "aged_unclustered_noise")
+                for pid in aged_ids
+            ])
 
         active_centroids, member_counts = get_active_centroids(cur)
 
@@ -184,6 +269,7 @@ def run_clustering_pipeline():
                         (best_hub, float(best_sim), pid)
                     )
                     cur.execute("DELETE FROM unclustered_posts_buffer WHERE post_id = %s;", (pid,))
+                    record_membership(cur, pid, best_hub)
                     write_outbox(cur, "post.assigned", pid, best_hub, {
                         "post_id": pid,
                         "event_id": best_hub,
@@ -191,15 +277,23 @@ def run_clustering_pipeline():
                         "status": "assigned",
                         "source": "event_birth_fallback"
                     })
+                    log_decisions_bulk(cur, [(
+                        pid, best_hub, float(best_sim), None, BIRTH_ASSIGN_THRESHOLD,
+                        float(best_sim) - BIRTH_ASSIGN_THRESHOLD, "assigned", float(best_sim),
+                        pv, mv, "event_birth_fallback"
+                    )])
 
                     # Bounded incremental centroid update
-                    n_eff = min(member_counts.get(best_hub, 1), CENTROID_MAX_MEMBERS)
-                    updated_centroid = (active_centroids[best_hub] * n_eff + emb) / (n_eff + 1)
-                    updated_centroid = updated_centroid / (np.linalg.norm(updated_centroid) + 1e-9)
+                    updated_centroid = normalize(bounded_rolling_centroid(
+                        active_centroids[best_hub],
+                        member_counts.get(best_hub, 1),
+                        [emb],
+                        CENTROID_MAX_MEMBERS,
+                    ))
                     active_centroids[best_hub] = updated_centroid
                     member_counts[best_hub] = member_counts.get(best_hub, 1) + 1
 
-                    centroid_str = "[" + ",".join(map(str, updated_centroid.tolist())) + "]"
+                    centroid_str = vector_to_array_literal(updated_centroid)
                     cur.execute(
                         """
                         UPDATE event_hubs 
@@ -216,8 +310,27 @@ def run_clustering_pipeline():
                 g, post_ids = construct_knn_event_graph(remaining_for_birth, k=4, min_similarity_floor=BIRTH_SIMILARITY_FLOOR)
                 communities = nx_comm.louvain_communities(g, weight='weight', resolution=1.0)
 
+                emb_by_pid = {
+                    (r["post_id"] if isinstance(r, dict) else r[0]):
+                    parse_embedding(r["embedding"] if isinstance(r, dict) else r[1])
+                    for r in remaining_for_birth
+                }
+
+                # Identity-entity disambiguation FIRST: a community that mixes
+                # confusable actors (Apple vs Samsung launch reads identically
+                # to the embedder) is split into per-actor components BEFORE the
+                # multi-author and cohesion guards evaluate each one, so the
+                # mixed community can never be born as one contaminated hub.
+                candidate_groups = []
                 for comm in communities:
                     cluster_post_ids = list(comm)
+                    if len(cluster_post_ids) < BIRTH_MIN_AUTHORS:
+                        continue
+                    for group in _entity_split_components(cur, cluster_post_ids):
+                        if len(group) >= BIRTH_MIN_AUTHORS:
+                            candidate_groups.append(group)
+
+                for cluster_post_ids in candidate_groups:
                     if len(cluster_post_ids) < BIRTH_MIN_AUTHORS:
                         continue
 
@@ -235,12 +348,10 @@ def run_clustering_pipeline():
                     if author_count < BIRTH_MIN_AUTHORS:
                         continue
 
-                    # Guardrail 2: Cluster cohesion check (average pairwise intra-cluster similarity >= 0.82)
-                    cluster_embeddings = [
-                        parse_embedding(r["embedding"] if isinstance(r, dict) else r[1])
-                        for r in remaining_for_birth
-                        if (r["post_id"] if isinstance(r, dict) else r[0]) in cluster_post_ids
-                    ]
+                    # Guardrail 2: Cluster cohesion check, measured per component
+                    # (the merged community's cohesion was contaminated by the
+                    # wrong-actor posts and is not a valid signal for either half)
+                    cluster_embeddings = [emb_by_pid[p] for p in cluster_post_ids if p in emb_by_pid]
                     embs_arr = np.array(cluster_embeddings)
                     norms = np.linalg.norm(embs_arr, axis=1, keepdims=True) + 1e-9
                     embs_norm = embs_arr / norms
@@ -263,17 +374,22 @@ def run_clustering_pipeline():
                     anchor_row = cur.fetchone()
                     anchor_pid = anchor_row["id"] if isinstance(anchor_row, dict) else anchor_row[0]
 
-                    initial_centroid = np.mean(cluster_embeddings, axis=0)
-                    initial_centroid = initial_centroid / (np.linalg.norm(initial_centroid) + 1e-9)
-                    centroid_str = "[" + ",".join(map(str, initial_centroid.tolist())) + "]"
+                    initial_centroid = normalize(np.mean(cluster_embeddings, axis=0))
+                    centroid_str = vector_to_array_literal(initial_centroid)
+
+                    # Hub identity is captured AT BIRTH onto the hub row itself
+                    # (title + stable handle) instead of being re-derived from a
+                    # member post's content on every render.
+                    title = title_from_seed(cur, anchor_pid, fallback="hub")
+                    handle = unique_handle(cur, title)
 
                     cur.execute(
                         """
-                        INSERT INTO event_hubs (centroid, member_count, anchor_post_id, status) 
-                        VALUES (%s::vector, %s, %s, 'active') 
+                        INSERT INTO event_hubs (centroid, member_count, seed_post_id, status, title, handle) 
+                        VALUES (%s::vector, %s, %s, 'active', %s, %s) 
                         RETURNING id;
                         """,
-                        (centroid_str, len(cluster_post_ids), anchor_pid)
+                        (centroid_str, len(cluster_post_ids), anchor_pid, title, handle)
                     )
                     event_row = cur.fetchone()
                     new_event_id = event_row["id"] if isinstance(event_row, dict) else event_row[0]
@@ -286,6 +402,15 @@ def run_clustering_pipeline():
                         "DELETE FROM unclustered_posts_buffer WHERE post_id = ANY(%s);",
                         (cluster_post_ids,)
                     )
+
+                    # First-class membership ledger: the seed post carries the
+                    # 'seed' role, everyone else 'member' - same transaction as
+                    # the event_id pointer so the two never disagree.
+                    for c_pid in cluster_post_ids:
+                        record_membership(
+                            cur, c_pid, new_event_id,
+                            role="seed" if c_pid == anchor_pid else "member"
+                        )
 
                     active_centroids[new_event_id] = initial_centroid
                     member_counts[new_event_id] = len(cluster_post_ids)
@@ -304,6 +429,17 @@ def run_clustering_pipeline():
                             "status": "assigned",
                             "source": "event_birth_community"
                         })
+
+                    # Journal the membership decision: born-hub assignments must
+                    # be as explainable in the decisions inspector as every
+                    # other final status (they previously were not, which made
+                    # born hubs invisible on the panel).
+                    log_decisions_bulk(cur, [
+                        (c_pid, new_event_id, cohesion, None, BIRTH_COHESION_FLOOR,
+                         cohesion - BIRTH_COHESION_FLOOR, "assigned", cohesion,
+                         pv, mv, "event_birth_community")
+                        for c_pid in cluster_post_ids
+                    ])
 
 
 if __name__ == "__main__":

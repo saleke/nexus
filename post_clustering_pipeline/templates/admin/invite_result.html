@@ -1,0 +1,11 @@
+<div class="modal-backdrop" x-init></div>
+<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="invite-modal-title">
+  <button type="button" class="modal-x" aria-label="close" onclick="this.closest('.modal-card').remove();document.querySelector('.modal-backdrop').remove();">&times;</button>
+  <div class="modal-title" id="invite-modal-title"><b>Invite ready</b></div>
+  <p class="muted small">Share this one-time link with <b>{{ email }}</b> by any channel — no email is sent. The link works for 7&nbsp;days and lets them set their own password.</p>
+  <code class="code-block" id="invite-link">{{ invite_link }}</code>
+  <div class="modal-actions">
+    <button class="btn small" type="button"
+            onclick="(function(btn){var el=document.getElementById('invite-link'),txt=(el?el.textContent:'').trim(),flash=function(){var o=btn.textContent;btn.textContent='copied!';setTimeout(function(){btn.textContent=o;},1500);},fallback=function(){try{var ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();var ok=document.execCommand('copy');document.body.removeChild(ta);if(ok)flash();}catch(e){btn.textContent='copy failed';}};if(navigator.clipboard&&navigator.clipboard.writeText&&window.isSecureContext){navigator.clipboard.writeText(txt).then(flash,fallback);}else{fallback();}})(this);">copy link</button>
+  </div>
+</div>

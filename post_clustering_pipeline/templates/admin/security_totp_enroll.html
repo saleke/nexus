@@ -1,0 +1,17 @@
+<h3 class="frag-title">Recovery (Google Authenticator)</h3>
+<p class="muted small">
+  Scan or enter this secret into your Authenticator app, then confirm with the
+  6-digit code below. Once confirmed, a forgotten password can be recovered.
+</p>
+<div class="totp-box">
+  <code class="totp-secret">{{ secret }}</code>
+  <span class="muted tiny">base32 secret</span>
+  <p class="small"><b>otpauth URI</b><br><code class="wrap">{{ uri }}</code></p>
+</div>
+<form class="form-inline" hx-post="/admin/settings/confirm-totp" hx-target="#security-confirm-out"
+      hx-swap="innerHTML">
+  <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+         placeholder="6-digit code" required>
+  <button class="btn small" type="submit">Verify & enroll</button>
+</form>
+<div id="security-confirm-out"></div>

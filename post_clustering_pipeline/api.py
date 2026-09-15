@@ -1,33 +1,124 @@
 import uuid
 import hmac
-from typing import Optional
+import os
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from .db import get_db_connection, get_db_cursor
-from .queues import celery_app
-from .config import MODEL_VERSION, POLICY_VERSION, OUTBOX_MAX_ATTEMPTS, API_AUTH_TOKEN
+from .db import get_db_cursor
+from .queues import bounded_push_ingest_hints as queues_bounded_push_ingest_hints, get_redis_client
+from .config import (
+    OUTBOX_MAX_ATTEMPTS, API_AUTH_TOKEN,
+    INGEST_HINTS_KEY, PACKAGE_DIR,
+)
 from .events import write_outbox
+from .membership import close_membership
+from .refs import hub_reference
+from .merges import client_merge
+from .corrections import unlink_post as unlink_correction, confirm_post as confirm_correction, CorrectionError
+from .consumers import authenticate_consumer, rate_limit_check
+from .admin import router as admin_router
 
 app = FastAPI(title="Nexus Event Clustering Platform API")
+app.include_router(admin_router)
+app.mount("/admin/static", StaticFiles(directory=os.path.join(PACKAGE_DIR, "static")), name="admin_static")
+
+# Fast-path hint queue: the API only pushes ids here (LPUSH). The row insert is
+# the durable source of truth; a redis push failure or a lost hint is recovered
+# by the 30s reconcile sweeper, which re-claims and dispatches pending posts.
 
 
 @app.middleware("http")
 async def service_authentication(request: Request, call_next):
-    """Require a configured bearer token for application endpoints.
+    """Authenticate every non-public request.
 
-    Authentication is opt-in for local development; production deployments should
-    set API_AUTH_TOKEN and keep health probes publicly reachable.
+    Two surfaces, two credentials:
+      * owner plane (/admin/*): the shared API_AUTH_TOKEN only - the panel must
+        additionally sit behind the operator's admin ingress / MFA upstream.
+      * data plane (everything else): the shared token OR a per-consumer token
+        (revocable, rate-limited on mutating + integration routes, and every
+        feedback action is attributed to the consumer that made it).
+
+    If API_AUTH_TOKEN is unset, the middleware stays open for local development
+    (documented behavior); production sets the token.
     """
-    public_paths = {"/health/live", "/health/ready", "/docs", "/openapi.json", "/redoc"}
-    if API_AUTH_TOKEN and request.url.path not in public_paths:
-        supplied = request.headers.get("authorization", "")
-        expected = f"Bearer {API_AUTH_TOKEN}"
-        if not hmac.compare_digest(supplied, expected):
-            return JSONResponse(status_code=401, content={"detail": "authentication required"}, headers={"WWW-Authenticate": "Bearer"})
+    public_paths = {"/health/live", "/health/ready", "/docs", "/openapi.json", "/redoc", "/admin/static", "/admin/health/ready"}
+    admin_public_paths = {"/admin/login", "/admin/forgot", "/admin/reset", "/admin/register",
+                          "/admin/login/google", "/admin/auth/google/callback"}
+    path = request.url.path
+    if path in public_paths or path in admin_public_paths or path.startswith("/admin/invite/"):
+        return await call_next(request)
+
+    shared_configured = bool(API_AUTH_TOKEN)
+    supplied = request.headers.get("authorization", "")
+    shared_ok = shared_configured and hmac.compare_digest(supplied, f"Bearer {API_AUTH_TOKEN}")
+
+    if path.startswith("/admin"):
+        if shared_ok or not shared_configured:
+            return await call_next(request)
+        # Panel-first: a valid browser session unlocks the owner plane.
+        from .admin_auth import verify_session
+        if verify_session(request.cookies.get("nexus_admin_session")):
+            return await call_next(request)
+        return await _admin_denied(request)
+
+    # Data plane: shared token (or dev-open) short-circuits.
+    if shared_ok or not shared_configured:
+        return await call_next(request)
+
+    consumer = None
+    if supplied.startswith("Bearer "):
+        consumer = authenticate_consumer(supplied[len("Bearer "):].strip())
+    if consumer is None:
+        return JSONResponse(status_code=401, content={"detail": "invalid credentials"},
+                            headers={"WWW-Authenticate": "Bearer"})
+    request.state.consumer = consumer
+    if _rate_limited_path(path, request.method):
+        allowed, _ = rate_limit_check(str(consumer["consumer_id"]),
+                                      int(consumer["rate_limit_per_minute"]))
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "rate limit exceeded for this consumer"},
+                headers={"Retry-After": "1",
+                         "X-Nexus-RateLimit-Limit": str(consumer["rate_limit_per_minute"]),
+                         "X-Nexus-RateLimit-Remaining": "0"})
     return await call_next(request)
+
+
+async def _admin_denied(request: Request):
+    """Session missing/expired: give browsers a friendly redirect and let
+    HTMX partials follow ``HX-Redirect``; plain API callers get a 401 JSON."""
+    hx = request.headers.get("hx-request") == "true"
+    if hx:
+        return JSONResponse(status_code=401, content={"detail": "authentication required"},
+                            headers={"HX-Redirect": "/admin/login", "WWW-Authenticate": "Bearer"})
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    if accepts_html and request.method == "GET":
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/admin/login", status_code=status.HTTP_303_SEE_OTHER)
+    return JSONResponse(status_code=401, content={"detail": "authentication required"},
+                        headers={"WWW-Authenticate": "Bearer"})
+
+
+def _rate_limited_path(path: str, method: str) -> bool:
+    """Consumer tokens are throttled where they can move load: the delivery
+    poll/ack loop and every data-plane write (ingest, corrections, merges,
+    deletes). Plain reads (status, hub views) stay open for token holders."""
+    if path.startswith("/integration/events"):
+        return True
+    return method in ("POST", "PUT", "PATCH", "DELETE")
+
+
+def _consumer_actor(request: Request, fallback: str = "user") -> str:
+    """Attribute a feedback action to the consumer that performed it; without
+    a consumer token, fall back to the caller-supplied actor label."""
+    c = getattr(request.state, "consumer", None)
+    if c and c.get("name"):
+        return c["name"]
+    return fallback
 
 
 def run():
@@ -63,6 +154,13 @@ class FeedbackConfirmRequest(BaseModel):
     actor: str = "user"
 
 
+class EventMergeRequest(BaseModel):
+    source_event_id: int
+    target_event_id: int
+    actor: str = "user"
+    note: str | None = None
+
+
 # --- Helper Function for Cursors ---
 def extract_field(row, dict_key: str, index: int = 0):
     """Safely extract values whether using RealDictCursor or standard tuple cursor."""
@@ -87,9 +185,19 @@ def health_ready():
             cur.execute("SELECT COUNT(*) AS dlq_count FROM integration_outbox WHERE delivery_status = 'failed'")
             row = cur.fetchone()
             dlq_count = extract_field(row, "dlq_count", 0) or 0
+            cur.execute(
+                """
+                SELECT COUNT(*) AS stuck_processing FROM posts
+                WHERE assignment_status = 'processing'
+                  AND assignment_updated_at < NOW() - INTERVAL '5 minutes';
+                """
+            )
+            row = cur.fetchone()
+            stuck_processing = extract_field(row, "stuck_processing", 0) or 0
         return {
-            "status": "ready",
-            "dlq_failed_events": dlq_count
+            "status": "ready" if stuck_processing == 0 else "degraded",
+            "dlq_failed_events": dlq_count,
+            "stuck_processing": stuck_processing,
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}")
@@ -145,9 +253,9 @@ def create_post(post: PostCreateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     try:
-        celery_app.send_task("post_clustering_pipeline.tasks.process_post_ingestion", args=[post_id, post.content])
+        queues_bounded_push_ingest_hints(post_id)
     except Exception as e:
-        print(f"\n[CELERY ERROR] Failed to send task to Redis: {e}\n")
+        print(f"\n[REDIS ERROR] Failed to push ingest hint: {e}\n")
 
     return {"status": "queued", "post_id": post_id}
 
@@ -191,12 +299,11 @@ def create_posts_batch(payload: BatchPostCreateRequest):
         print(f"\n[API ERROR] Failed in batch post ingestion: {e}\n")
         raise HTTPException(status_code=500, detail=str(e))
 
-    for i in range(0, len(created_posts), 64):
-        chunk = [{"id": pid, "content": content} for pid, content in created_posts[i:i + 64]]
-        try:
-            celery_app.send_task("post_clustering_pipeline.tasks.process_post_batch_ingestion", args=[chunk])
-        except Exception as e:
-            print(f"\n[CELERY ERROR] Failed to dispatch batch to Redis: {e}\n")
+    try:
+        if created_posts:
+            queues_bounded_push_ingest_hints(*[str(pid) for pid, _ in created_posts])
+    except Exception as e:
+        print(f"\n[REDIS ERROR] Failed to push ingest hints: {e}\n")
 
     return {"status": "queued", "post_ids": [pid for pid, _ in created_posts]}
 
@@ -204,6 +311,12 @@ def create_posts_batch(payload: BatchPostCreateRequest):
 @app.delete("/posts/{post_id}")
 def delete_post(post_id: int):
     with get_db_cursor() as cur:
+        cur.execute("SELECT event_id FROM posts WHERE id = %s;", (post_id,))
+        prior = cur.fetchone()
+        if not prior:
+            raise HTTPException(status_code=404, detail="Post not found")
+        old_event = extract_field(prior, "event_id", 0)
+
         cur.execute(
             """
             UPDATE posts 
@@ -216,86 +329,67 @@ def delete_post(post_id: int):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Post not found")
+
+        if old_event is not None:
+            cur.execute(
+                "UPDATE event_hubs SET member_count = GREATEST(member_count - 1, 0), last_updated_at = NOW() WHERE id = %s;",
+                (old_event,)
+            )
+            close_membership(cur, post_id)
+            write_outbox(cur, "post.deleted", post_id, None, {
+                "status": "deleted", "post_id": post_id, "previous_event_id": old_event
+            })
+        else:
+            write_outbox(cur, "post.deleted", post_id, None, {"status": "deleted", "post_id": post_id})
         cur.execute("DELETE FROM unclustered_posts_buffer WHERE post_id = %s;", (post_id,))
-        write_outbox(cur, "post.deleted", post_id, None, {"status": "deleted"})
+        from .policy import current_versions
+        from .decisions import log_decision
+        pv, mv = current_versions(cur)
+        log_decision(cur, post_id=post_id, event_id=None, similarity=None, runner_similarity=None,
+                     threshold_used=None, margin_budget=None, status="noise", confidence=None,
+                     policy_version=pv, model_version=mv, reason="manual_delete")
     return {"status": "deleted", "post_id": post_id}
 
 
 @app.post("/posts/unlink", status_code=status.HTTP_200_OK)
-def unlink_post(payload: FeedbackRemoveRequest):
-    with get_db_cursor() as cur:
-        cur.execute("SELECT id FROM event_hubs WHERE id = %s;", (payload.event_id,))
-        event_row = cur.fetchone()
-        if not event_row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Event Hub #{payload.event_id} does not exist."
-            )
-
-        cur.execute(
-            """
-            SELECT p.embedding, (1 - (p.embedding <=> (
-                SELECT embedding FROM posts WHERE event_id = %s AND id != %s AND embedding IS NOT NULL LIMIT 1
-            ))) AS similarity
-            FROM posts p WHERE p.id = %s;
-            """,
-            (payload.event_id, payload.post_id, payload.post_id)
-        )
-        row = cur.fetchone()
-        raw_sim = extract_field(row, "similarity", 1)
-        sim_score = float(raw_sim) if raw_sim is not None else 0.0
-
-        cur.execute(
-            """
-            UPDATE posts 
-            SET event_id = NULL, assignment_status = 'candidate', 
-                assignment_confidence = NULL, assignment_updated_at = NOW() 
-            WHERE id = %s;
-            """,
-            (payload.post_id,)
-        )
-        cur.execute(
-            """
-            INSERT INTO clustering_feedback_log (post_id, event_id, initial_similarity_score, feedback_type)
-            VALUES (%s, %s, %s, 'user_removed');
-            """,
-            (payload.post_id, payload.event_id, sim_score)
-        )
-        write_outbox(cur, "post.unlinked", payload.post_id, payload.event_id, {
-            "post_id": payload.post_id,
-            "previous_event_id": payload.event_id,
-            "status": "unlinked"
-        })
-
-    return {"status": "unlinked", "post_id": payload.post_id, "event_id": payload.event_id}
+def unlink_post(payload: FeedbackRemoveRequest, request: Request):
+    """Human-corrected removal: the post goes back to 'candidate' (gradeable),
+    the feedback is tagged with the policy/model in effect, and the outbox
+    event carries content references so the operator's client can label the
+    change without a follow-up fetch."""
+    try:
+        actor = _consumer_actor(request, "user")
+        with get_db_cursor() as cur:
+            return unlink_correction(cur, payload.post_id, payload.event_id, actor=actor)
+    except CorrectionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @app.post("/posts/confirm", status_code=status.HTTP_200_OK)
-def confirm_post(payload: FeedbackConfirmRequest):
-    with get_db_cursor() as cur:
-        cur.execute("SELECT event_id, assignment_confidence FROM posts WHERE id = %s", (payload.post_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Post not found")
-        old_event = extract_field(row, "event_id", 0)
-        confidence = extract_field(row, "assignment_confidence", 1) or 0
+def confirm_post(payload: FeedbackConfirmRequest, request: Request):
+    actor = _consumer_actor(request, payload.actor)
+    try:
+        with get_db_cursor() as cur:
+            return confirm_correction(cur, payload.post_id, payload.event_id, actor=actor)
+    except CorrectionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
-        cur.execute(
-            "UPDATE posts SET event_id = %s, assignment_status = 'assigned', assignment_updated_at = NOW() WHERE id = %s",
-            (payload.event_id, payload.post_id)
-        )
-        cur.execute(
-            """INSERT INTO clustering_feedback_log
-            (post_id, event_id, initial_similarity_score, feedback_type, actor, model_version, policy_version)
-            VALUES (%s, %s, %s, 'user_confirmed', %s, %s, %s)""",
-            (payload.post_id, payload.event_id, confidence, payload.actor, MODEL_VERSION, POLICY_VERSION)
-        )
-        write_outbox(
-            cur, "post.confirmed", payload.post_id, payload.event_id,
-            {"post_id": payload.post_id, "event_id": payload.event_id, "status": "assigned", "confidence": float(confidence)}
-        )
 
-    return {"status": "confirmed", "post_id": payload.post_id, "event_id": payload.event_id, "previous_event_id": old_event}
+@app.post("/events/merge", status_code=status.HTTP_200_OK)
+def merge_events(payload: EventMergeRequest, request: Request):
+    """Soft-merge ``source_event_id`` into ``target_event_id``.
+
+    Uses the SAME guarded path as the internal auto-detect job: canonical
+    resolution, advisory-lock serialization, member snapshot, centroid
+    rebalance. The response and the ``event.merged`` payload carry the two
+    hubs' content references so humans see WHICH hubs were merged, not ids.
+    """
+    actor = _consumer_actor(request, payload.actor)
+    try:
+        result = client_merge(payload.source_event_id, payload.target_event_id, actor)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "merged", **result, "actor": actor, "note": payload.note}
 
 
 @app.get("/integration/events")
@@ -323,13 +417,15 @@ def integration_events(limit: int = 100, after: int = 0, consumer: str = "defaul
                 WHERE id > %s AND available_at <= NOW()
                   AND (delivery_status = 'pending' OR (delivery_status = 'leased' AND lease_until < NOW()))
                 ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED
+            ),
+            leased AS (
+                UPDATE integration_outbox o SET delivery_status = 'leased', consumer = %s,
+                    lease_token = %s, lease_until = NOW() + INTERVAL '2 minutes', attempts = attempts + 1
+                FROM claimed c WHERE o.id = c.id
+                RETURNING o.id, o.id::text AS event_key, o.schema_version, o.event_type, o.post_id,
+                    o.event_id, o.payload, o.attempts, o.lease_token, o.created_at
             )
-            UPDATE integration_outbox o SET delivery_status = 'leased', consumer = %s,
-                lease_token = %s, lease_until = NOW() + INTERVAL '2 minutes', attempts = attempts + 1
-            FROM claimed c WHERE o.id = c.id
-            RETURNING o.id, o.id::text AS event_key, o.schema_version, o.event_type, o.post_id,
-                o.event_id, o.payload, o.attempts, o.lease_token, o.created_at
-            ORDER BY o.id
+            SELECT * FROM leased ORDER BY id
             """,
             (after, limit, consumer, token)
         )
@@ -395,7 +491,7 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         canonical_id, was_redirected = resolve_canonical_hub(cur, hub_id)
         cur.execute(
             """
-            SELECT id, status, discourse_type, member_count, anchor_post_id, created_at, last_updated_at
+            SELECT id, status, discourse_type, member_count, seed_post_id, created_at, last_updated_at
             FROM event_hubs
             WHERE id = %s;
             """,
@@ -405,7 +501,7 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         if not hub_row:
             raise HTTPException(status_code=404, detail="Event Hub not found")
 
-        anchor_pid = extract_field(hub_row, "anchor_post_id", 4)
+        anchor_pid = extract_field(hub_row, "seed_post_id", 4)
         status_val = extract_field(hub_row, "status", 1) or "active"
         discourse_type = extract_field(hub_row, "discourse_type", 2) or "event"
 
@@ -478,12 +574,17 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         uv_row = cur.fetchone()
         unique_voices = extract_field(uv_row, "unique_voices", 0) or len(timeline)
 
+        # The hub reference must be built while the cursor is still open - the
+        # return dict below is evaluated after the context manager has closed it.
+        reference = hub_reference(cur, canonical_id)
+
     return {
         "hub_id": canonical_id,
         "requested_hub_id": hub_id,
         "was_redirected": was_redirected,
         "status": status_val,
         "discourse_type": discourse_type,
+        "reference": reference,
         "metrics": {
             "total_posts": total_posts,
             "unique_voices": unique_voices,

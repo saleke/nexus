@@ -8,8 +8,11 @@ CREATE TABLE event_hubs (
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     status VARCHAR(20) NOT NULL DEFAULT 'active',
     discourse_type VARCHAR(50) NOT NULL DEFAULT 'event',
-    anchor_post_id INT,
+    seed_post_id INT,
     merged_into_id INT REFERENCES event_hubs(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    handle TEXT NOT NULL UNIQUE,
+    summary TEXT,
     centroid vector(384)
 );
 
@@ -30,9 +33,11 @@ CREATE TABLE posts (
     assignment_status VARCHAR(20) NOT NULL DEFAULT 'pending',
     assignment_confidence NUMERIC(5,4),
     assignment_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    post_seq BIGINT NOT NULL DEFAULT 0,
     event_id INT REFERENCES event_hubs(id) ON DELETE SET NULL,
     embedding vector(384),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    entities text[]
 );
 
 CREATE TABLE unclustered_posts_buffer (
@@ -109,3 +114,166 @@ CREATE INDEX IF NOT EXISTS idx_event_hubs_redirect ON event_hubs(id, merged_into
 CREATE INDEX IF NOT EXISTS idx_active_event_hubs_hnsw 
 ON event_hubs USING hnsw (centroid vector_cosine_ops) 
 WHERE is_active = TRUE AND centroid IS NOT NULL;
+
+-- =====================================================================
+-- Control plane (de-black-boxing): decision journal, feedback rollups,
+-- versioned policy history, admin audit, and per-consumer auth.
+-- All statements are idempotent so re-applying schema.sql is safe.
+-- =====================================================================
+
+-- Decision journal: one row per final assignment decision (assigned /
+-- candidate / unassigned / noise), written in the SAME transaction as the
+-- status change. Raw material for precision/coverage estimates, threshold
+-- tuning, drift detection, and the owner-facing decisions inspector.
+CREATE TABLE IF NOT EXISTS assignment_decision_log (
+    id BIGSERIAL PRIMARY KEY,
+    post_id INT NOT NULL,
+    event_id INT,
+    similarity DOUBLE PRECISION,
+    runner_similarity DOUBLE PRECISION,
+    threshold_used DOUBLE PRECISION,
+    margin_budget DOUBLE PRECISION,
+    status VARCHAR(20) NOT NULL,
+    confidence DOUBLE PRECISION,
+    policy_version VARCHAR(64),
+    model_version VARCHAR(64),
+    reason VARCHAR(200),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_decision_log_post ON assignment_decision_log(post_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_log_window ON assignment_decision_log(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_decision_log_post_status ON assignment_decision_log(post_id, status);
+
+-- Periodic per-window quality rollups. 'source' separates human feedback from
+-- system-decided counters so the system can never grade itself.
+CREATE TABLE IF NOT EXISTS feedback_rollups (
+    id BIGSERIAL PRIMARY KEY,
+    window_start TIMESTAMPTZ NOT NULL,
+    window_end TIMESTAMPTZ NOT NULL,
+    policy_version VARCHAR(64),
+    model_version VARCHAR(64),
+    source VARCHAR(20) NOT NULL,
+    total_decisions BIGINT NOT NULL DEFAULT 0,
+    confirmed BIGINT NOT NULL DEFAULT 0,
+    removed BIGINT NOT NULL DEFAULT 0,
+    dismissed BIGINT NOT NULL DEFAULT 0,
+    precision_value DOUBLE PRECISION,
+    coverage_value DOUBLE PRECISION,
+    unlink_rate DOUBLE PRECISION,
+    drift_index DOUBLE PRECISION,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (window_start, window_end, policy_version, model_version, source)
+);
+CREATE INDEX IF NOT EXISTS idx_rollups_recent ON feedback_rollups(created_at DESC);
+
+-- Versioned knob/calibration history. status: applied | proposed | rejected.
+-- source: manual | owner | autotune. Every threshold/model/policy change is
+-- an explainable, reversible row here.
+CREATE TABLE IF NOT EXISTS policy_history (
+    id BIGSERIAL PRIMARY KEY,
+    policy_version VARCHAR(64) NOT NULL,
+    knob VARCHAR(64) NOT NULL,
+    old_value DOUBLE PRECISION,
+    new_value DOUBLE PRECISION,
+    status VARCHAR(20) NOT NULL DEFAULT 'applied',
+    source VARCHAR(20) NOT NULL DEFAULT 'manual',
+    rationale TEXT,
+    actor VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_policy_history_knob ON policy_history(knob, created_at DESC);
+
+-- Every control-plane / panel mutation lands here (who, what, from -> to).
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    actor VARCHAR(100) NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(50),
+    entity_id VARCHAR(64),
+    before_state JSONB,
+    after_state JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_recent ON admin_audit_log(created_at DESC);
+
+-- Per-consumer API access (feedback + admin routes). Legacy shared-token
+-- auth keeps working alongside; consumer rows make signal attribution and
+-- severing possible.
+CREATE TABLE IF NOT EXISTS api_consumers (
+    id SERIAL PRIMARY KEY,
+    consumer_id VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    token_hash VARCHAR(64) NOT NULL,
+    rate_limit_per_minute INT NOT NULL DEFAULT 60,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_consumers_active ON api_consumers(is_active);
+
+-- Reversible soft-merges. The snapshot (post ids + source centroid + counts
+-- at merge time) makes re-opening deterministic: only snapshot members rebound,
+-- fresh arrivals in the target are never disturbed.
+CREATE TABLE IF NOT EXISTS hub_merges (
+    id SERIAL PRIMARY KEY,
+    source_event_id INT NOT NULL,
+    target_event_id INT NOT NULL,
+    initiated_by VARCHAR(20) NOT NULL DEFAULT 'client',
+    status VARCHAR(20) NOT NULL DEFAULT 'merged',
+    snapshot_post_ids JSONB NOT NULL,
+    snapshot_member_count INT NOT NULL,
+    snapshot_centroid_source TEXT,
+    opened_note TEXT,
+    reopened_note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reopened_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_hub_merges_hubs ON hub_merges(source_event_id, target_event_id, status);
+
+-- =====================================================================
+-- Hub identity (v3) + first-class membership ledger.
+--   * Seed/identity separation: the hub's label lives on event_hubs as
+--     title/handle; seed_post_id is lineage only (renamed from anchor_post_id
+--     so the old column's identity role is unambiguous).
+--   * hub_members: one row per admission; live membership is a closed
+--     interval (departed_at NULL = current). Mirrors the single-valued
+--     posts.event_id pointer in the same transaction.
+-- Re-applying is safe for both fresh installs and live DBs.
+-- =====================================================================
+DO $$
+BEGIN
+    -- Column renamed in the canonical DDL; on a live DB this is a no-op
+    -- once applied (undefined_column is swallowed), so it stays idempotent.
+    ALTER TABLE event_hubs RENAME COLUMN anchor_post_id TO seed_post_id;
+EXCEPTION WHEN undefined_column THEN
+    NULL;
+END $$;
+
+ALTER TABLE event_hubs ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE event_hubs ADD COLUMN IF NOT EXISTS handle TEXT;
+ALTER TABLE event_hubs ADD COLUMN IF NOT EXISTS summary TEXT;
+
+CREATE TABLE IF NOT EXISTS hub_members (
+    id BIGSERIAL PRIMARY KEY,
+    post_id INT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    hub_id INT NOT NULL REFERENCES event_hubs(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL DEFAULT 'member',
+    admitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    departed_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hub_members_live_post
+    ON hub_members(post_id) WHERE departed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_hub_members_hub_timeline
+    ON hub_members(hub_id, admitted_at, id);
+CREATE INDEX IF NOT EXISTS idx_hub_members_post_history
+    ON hub_members(post_id, admitted_at DESC);
+
+-- Desk content-search (ILIKE '%...%') is exactly the trigram case: without
+-- these, every keystroke in the merge desk scans the whole posts/hubs tables.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_posts_content_trgm
+    ON posts USING gin (content gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_hubs_title_trgm
+    ON event_hubs USING gin (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_hubs_handle_trgm
+    ON event_hubs USING gin (handle gin_trgm_ops);

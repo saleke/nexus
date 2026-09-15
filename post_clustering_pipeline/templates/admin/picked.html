@@ -1,0 +1,12 @@
+{# pick fragment: hidden input + content label, rendered INSIDE the merge form.
+   The matching search picker is cleared OOB so the remaining options disappear
+   once one hub is chosen. #}
+{% set slot_map = {'source-picker': '#picked-source', 'target-picker': '#picked-target',
+                   'confirm-target-picker': '#picked-confirm-target'} %}
+<input type="hidden" name="{{ name }}" value="{{ value }}">
+<div class="chip strong">{{ hub.label }}
+  <span class="muted tiny">id {{ value }}</span>
+</div>
+<button class="btn small ghost" hx-get="/admin/pick-clear"
+        hx-target="{{ slot_map.get(picker, '#picked-source') }}">clear</button>
+{% if picker %}<div id="{{ picker }}" hx-swap-oob="true"></div>{% endif %}

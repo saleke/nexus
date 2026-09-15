@@ -1,0 +1,64 @@
+<div id="admins-panel">
+  <div class="metric-row">
+    <div class="metric-card">
+      <span class="metric-label">Total</span>
+      <span class="metric-value">{{ admin_stats.total }}</span>
+    </div>
+    <div class="metric-card metric-policy">
+      <span class="metric-label">Active</span>
+      <span class="metric-value">{{ admin_stats.active }}</span>
+    </div>
+    <div class="metric-card metric-threshold">
+      <span class="metric-label">Disabled</span>
+      <span class="metric-value">{{ admin_stats.disabled }}</span>
+    </div>
+    <div class="metric-card metric-embedding">
+      <span class="metric-label">With OTP</span>
+      <span class="metric-value">{{ admin_stats.otp }}</span>
+    </div>
+  </div>
+
+  <form class="filter-bar" hx-get="/admin/settings/admins" hx-target="#admins-panel" hx-swap="outerHTML"
+        hx-trigger="submit, change from:select">
+    <label class="filter-field">Search
+      <input type="search" name="q" value="{{ search }}" placeholder="email…" autocomplete="off">
+    </label>
+    <label class="filter-field">Status
+      <select name="status">
+        <option value="" {{ 'selected' if not status }}>all</option>
+        <option value="active" {{ 'selected' if status == 'active' }}>active</option>
+        <option value="disabled" {{ 'selected' if status == 'disabled' }}>disabled</option>
+      </select>
+    </label>
+    <button class="btn" type="submit">Apply</button>
+  </form>
+
+  <div id="admin-flash" class="msg-box"></div>
+
+  {% if admins %}
+  <table class="tbl decisions-tbl">
+    <thead>
+      <tr>
+        <th>email</th>
+        <th class="th-status">otp</th>
+        <th class="th-status">status</th>
+        <th class="td-detail">actions</th>
+        <th class="td-detail"></th>
+      </tr>
+    </thead>
+    <tbody id="admin-rows">
+      {% include "admin_rows.html" %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No admins match the current filters.</p>
+  {% endif %}
+
+  <h4 class="frag-title">Invite an admin</h4>
+  <form class="inline-form" hx-post="/admin/settings/invite"
+        hx-target="#admin-flash" hx-swap="innerHTML">
+    <input type="email" name="email" placeholder="invitee@example.com" required>
+    <button class="btn small" type="submit">Invite</button>
+  </form>
+  <p class="muted tiny">The invitee receives a self-service link (no email is sent): share it with them and they set their own password.</p>
+</div>

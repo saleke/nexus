@@ -1,0 +1,8 @@
+{# fragment: consumer created — plaintext token shown exactly once #}
+<div class="alert ok">
+  <b>Consumer {{ name }} created.</b>
+  <div class="small">consumer_id: <code>{{ consumer_id }}</code></div>
+  <div class="small">token (shown once — store securely): <code class="token-value">{{ token }}</code></div>
+  <div class="muted tiny">Auth header the social platform sends on every request:</div>
+  <div class="code-block small">Authorization: Bearer {{ token }}</div>
+</div>

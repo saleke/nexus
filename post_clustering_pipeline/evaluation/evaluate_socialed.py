@@ -4,6 +4,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
 from ..jobs.event_birth import run_clustering_pipeline
 from ..db import get_db_connection
+from ..embed_io import vector_to_array_literal
 
 # Simulated benchmark records representing real dataset distributions
 BENCHMARK_DATASET = [
@@ -27,7 +28,7 @@ def main():
     embeddings = model.encode(texts, show_progress_bar=False)
     
     for idx, item in enumerate(BENCHMARK_DATASET):
-        emb_str = "[" + ",".join(map(str, embeddings[idx].tolist())) + "]"
+        emb_str = vector_to_array_literal(embeddings[idx].tolist())
         
         cur.execute(
             """

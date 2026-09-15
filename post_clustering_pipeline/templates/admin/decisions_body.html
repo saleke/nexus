@@ -1,0 +1,42 @@
+<div id="decisions-body">
+  <div class="metric-row">
+    <div class="metric-card">
+      <span class="metric-label">Total</span>
+      <span class="metric-value">{{ stats.total }}</span>
+    </div>
+    <div class="metric-card metric-policy">
+      <span class="metric-label">Assigned</span>
+      <span class="metric-value">{{ stats.assigned }}</span>
+    </div>
+    <div class="metric-card metric-embedding">
+      <span class="metric-label">Candidate</span>
+      <span class="metric-value">{{ stats.candidate }}</span>
+    </div>
+    <div class="metric-card metric-threshold">
+      <span class="metric-label">Unassigned</span>
+      <span class="metric-value">{{ stats.unassigned }}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Noise</span>
+      <span class="metric-value">{{ stats.noise }}</span>
+    </div>
+  </div>
+
+  <table class="tbl decisions-tbl">
+    <thead>
+      <tr>
+        <th class="th-time"><a class="sort-link" href="#" data-asc="time_asc" data-desc="time_desc">time &darr;</a></th>
+        <th class="th-status">status</th>
+        <th class="th-reason">why</th>
+        <th class="th-sim"><a class="sort-link" href="#" data-asc="sim_desc" data-desc="sim_asc">sim</a></th>
+        <th>post (content)</th>
+        <th>hub (label)</th>
+        <th class="th-policy">policy / model</th>
+        <th class="td-detail"></th>
+      </tr>
+    </thead>
+    <tbody id="decision-rows">
+      {% include "decisions_rows.html" %}
+    </tbody>
+  </table>
+</div>

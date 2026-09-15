@@ -1,0 +1,39 @@
+{# result card after propose/apply/revert — always surfaces the warning + estimate #}
+{% if error %}
+<p class="alert">{{ error }}</p>
+{% else %}
+<div class="alert {{ 'warn' if result.status == 'proposed' else 'ok' }}">
+  <b>{% if result.status == 'applied' %}Applied{% elif result.status == 'proposed' %}Proposed{% else %}Change{% endif %}. </b>
+  {{ result.knob }}: {{ "%.4f"|format(result.old_value) if result.old_value is not none else '—' }} → {{ "%.4f"|format(result.new_value) }}
+  <span class="muted small">(policy version {{ result.policy_version }} · id {{ result.policy_history_id }})</span>
+</div>
+{% if result.warning %}
+<div class="alert warn">
+  <b>Performance warning.</b> {{ result.warning.warning }}
+  {% for a in result.warning.affected %}<span class="chip small">{{ a }}</span>{% endfor %}
+</div>
+{% endif %}
+{% if assessed %}
+<table class="tbl compact">
+  <thead><tr><th colspan="2">Blast radius (estimate from decision journal)</th></tr></thead>
+  <tbody>
+    <tr><td>decisions on current threshold</td><td>{{ assessed.known_decisions }}</td></tr>
+    <tr><td>assigned posts that would drop out</td><td>{{ assessed.would_flip_down }}</td></tr>
+    <tr><td>candidate posts that would flip up</td><td>{{ assessed.would_flip_up }}</td></tr>
+    <tr><td class="muted small" colspan="2">estimate only — per-row runner margins are not replayed.</td></tr>
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+{# Refresh the change-history table (incl. revert buttons) without a reload. #}
+<div id="calib-history" hx-swap-oob="true">
+  {% include "calibration_history.html" %}
+</div>
+
+{# Update the knob's "current" chip in place so a successful apply is visible
+   without a page refresh (a repeat click on the old value is then a no-op,
+   which the policy layer rejects instead of minting a change-2 row). #}
+{% if result and result.new_value is not none %}
+<span id="cur-{{ result.knob }}" class="chip threshold" hx-swap-oob="true">{{ "%.4f"|format(result.new_value) }}</span>
+{% endif %}

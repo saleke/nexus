@@ -1,13 +1,20 @@
 """Asynchronous webhook push dispatcher with circuit breaker and DLQ routing."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import time
 import requests
 from datetime import datetime, timezone
 import json
 
 from .db import get_db_cursor
-from .config import EVENT_DELIVERY_MODE, EVENT_WEBHOOK_URL, OUTBOX_MAX_ATTEMPTS
+from .config import EVENT_DELIVERY_MODE, EVENT_WEBHOOK_URL, EVENT_WEBHOOK_SIGNING_SECRET, OUTBOX_MAX_ATTEMPTS
+
+
+def signature_for(payload: bytes, secret: str) -> str:
+    """Hex HMAC-SHA256 of the EXACT bytes being delivered (RFC 2104)."""
+    return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
 class CircuitBreaker:
@@ -54,6 +61,8 @@ def dispatch_pending_webhooks(limit: int = 50, webhook_url: str = EVENT_WEBHOOK_
     """Push leased outbox events to the configured webhook endpoint with connection pooling."""
     if not webhook_url or EVENT_DELIVERY_MODE != "webhook":
         return 0
+    if not webhook_url.startswith(("https://", "http://")):
+        return 0  # refuse to POST anywhere exotic (file:, redis:, data:)
 
     if circuit_breaker.is_open():
         return 0
@@ -99,15 +108,22 @@ def dispatch_pending_webhooks(limit: int = 50, webhook_url: str = EVENT_WEBHOOK_
                 "payload": payload,
                 "dispatched_at": datetime.now(timezone.utc).isoformat()
             }
+            payload_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "Nexus-Event-Dispatcher/1.0",
+            }
+            signing = EVENT_WEBHOOK_SIGNING_SECRET
+            if signing:
+                # Sign the exact bytes we send; the host recomputes and compares
+                # constant-time. Uniqueness-header per event id for idempotency.
+                headers["X-Nexus-Signature"] = "sha256=" + signature_for(payload_bytes, signing)
 
             try:
                 res = session.post(
                     webhook_url,
-                    json=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "User-Agent": "Nexus-Event-Dispatcher/1.0"
-                    },
+                    data=payload_bytes,
+                    headers=headers,
                     timeout=3.0
                 )
                 if res.status_code in {200, 201, 202, 204}:

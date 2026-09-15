@@ -1,4 +1,10 @@
-"""Promote a validated embedding adapter without mutating the active model blindly."""
+"""Promote a validated embedding adapter without mutating the active model blindly.
+
+Status contract: the registry row that is CURRENTLY IN EFFECT is the one with
+``status = 'promoted'`` (this is what ``policy.current_versions`` and the owner
+panel resolve). Previously promoted rows are retired; staged community/learner
+adapters sit at the schema default ``candidate`` until pass/fail decides here.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +18,7 @@ def promote(model_version: str, adapter_path: str, precision: float, recall: flo
         return "rejected: validation quality gates failed"
 
     with get_db_cursor(commit=True) as cur:
-        cur.execute("SELECT validation_precision, validation_recall, noise_false_positive_rate FROM model_registry WHERE status = 'active' ORDER BY promoted_at DESC LIMIT 1")
+        cur.execute("SELECT validation_precision, validation_recall, noise_false_positive_rate FROM model_registry WHERE status = 'promoted' ORDER BY promoted_at DESC LIMIT 1")
         current = cur.fetchone()
         if current:
             current_precision = float((current["validation_precision"] if isinstance(current, dict) else current[0]) or 0)
@@ -22,14 +28,14 @@ def promote(model_version: str, adapter_path: str, precision: float, recall: flo
                 return "rejected: candidate is worse than active model"
             if noise_fp > current_noise and precision <= current_precision:
                 return "rejected: candidate increases noise errors without precision gain"
-        cur.execute("UPDATE model_registry SET status = 'retired' WHERE status = 'active'")
+        cur.execute("UPDATE model_registry SET status = 'retired' WHERE status = 'promoted'")
         cur.execute("""INSERT INTO model_registry
             (model_version, adapter_path, validation_precision, validation_recall,
              noise_false_positive_rate, status, promoted_at)
-            VALUES (%s, %s, %s, %s, %s, 'active', NOW())
+            VALUES (%s, %s, %s, %s, %s, 'promoted', NOW())
             ON CONFLICT (model_version) DO UPDATE SET adapter_path = EXCLUDED.adapter_path,
               validation_precision = EXCLUDED.validation_precision, validation_recall = EXCLUDED.validation_recall,
-              noise_false_positive_rate = EXCLUDED.noise_false_positive_rate, status = 'active', promoted_at = NOW()
+              noise_false_positive_rate = EXCLUDED.noise_false_positive_rate, status = 'promoted', promoted_at = NOW()
         """, (model_version, adapter_path, precision, recall, noise_fp))
     return "promoted"
 

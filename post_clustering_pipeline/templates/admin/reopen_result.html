@@ -1,0 +1,10 @@
+{% if error %}
+<p class="alert">{{ error }}</p>
+{% else %}
+<div class="alert ok">
+  <b>Reopened.</b> Rebound {{ result.rebound_posts }} posts back to
+  <span class="strong">{{ result.source.label }}</span> (out of
+  <span class="strong">{{ result.target.label }}</span>).
+  <span class="muted small">event.merged_reopened sent · id {{ result.merge_id }}</span>
+</div>
+{% endif %}

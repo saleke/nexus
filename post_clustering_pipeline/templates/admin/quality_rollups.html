@@ -1,0 +1,80 @@
+<div id="quality-rollups">
+  <div class="metric-row">
+    <div class="metric-card metric-policy">
+      <span class="metric-label">Total decisions</span>
+      <span class="metric-value">{{ s_total }}</span>
+    </div>
+    <div class="metric-card metric-embedding">
+      <span class="metric-label">Confirmed</span>
+      <span class="metric-value">{{ s_confirmed }}</span>
+    </div>
+    <div class="metric-card metric-threshold">
+      <span class="metric-label">Removed</span>
+      <span class="metric-value">{{ s_removed }}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Dismissed</span>
+      <span class="metric-value">{{ s_dismissed }}</span>
+    </div>
+    <div class="metric-card metric-embedding">
+      <span class="metric-label">Precision</span>
+      <span class="metric-value">{% if s_precision is not none %}{{ "%.3f"|format(s_precision) }}{% else %}—{% endif %}</span>
+    </div>
+    <div class="metric-card metric-policy">
+      <span class="metric-label">Coverage</span>
+      <span class="metric-value">{% if s_coverage is not none %}{{ "%.3f"|format(s_coverage) }}{% else %}—{% endif %}</span>
+    </div>
+    <div class="metric-card metric-threshold">
+      <span class="metric-label">Unlink</span>
+      <span class="metric-value">{% if s_unlink is not none %}{{ "%.3f"|format(s_unlink) }}{% else %}—{% endif %}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Drift</span>
+      <span class="metric-value">{% if s_drift is not none %}{{ "%.3f"|format(s_drift) }}{% else %}—{% endif %}</span>
+    </div>
+  </div>
+
+  {% if rollups %}
+  <table class="tbl decisions-tbl">
+    <thead>
+      <tr>
+        <th class="th-time"><a class="sort-link" href="#" data-asc="window_asc" data-desc="window_desc">window &darr;</a></th>
+        <th>source</th>
+        <th class="th-policy">policy / model</th>
+        <th><a class="sort-link" href="#" data-asc="total_asc" data-desc="total_desc">total</a></th>
+        <th>confirmed</th>
+        <th>removed</th>
+        <th class="th-sim"><a class="sort-link" href="#" data-asc="precision_asc" data-desc="precision_desc">precision</a></th>
+        <th class="td-detail"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rollups %}
+      <tr class="dec-row">
+        <td>{{ r.window_start.strftime('%d %b %H:%M') if r.window_start is not none else '—' }}</td>
+        <td>{{ r.source }}</td>
+        <td>{{ r.policy_version }} / {{ r.model_version }}</td>
+        <td>{{ r.total_decisions or 0 }}</td>
+        <td>{{ r.confirmed or 0 }}</td>
+        <td>{{ r.removed or 0 }}</td>
+        <td>{% if r.precision_value is not none %}{{ "%.3f"|format(r.precision_value) }}{% else %}—{% endif %}</td>
+        <td class="td-detail"><button class="row-expand" aria-expanded="false">&#9662;</button></td>
+      </tr>
+      <tr class="dec-detail" hidden>
+        <td colspan="8">
+          <div class="dec-detail-grid">
+            <div><span class="muted">coverage</span><b>{% if r.coverage_value is not none %}{{ "%.3f"|format(r.coverage_value) }}{% else %}—{% endif %}</b></div>
+            <div><span class="muted">unlink rate</span><b>{% if r.unlink_rate is not none %}{{ "%.3f"|format(r.unlink_rate) }}{% else %}—{% endif %}</b></div>
+            <div><span class="muted">drift index</span><b>{% if r.drift_index is not none %}{{ "%.3f"|format(r.drift_index) }}{% else %}—{% endif %}</b></div>
+            <div><span class="muted">dismissed</span><b>{{ r.dismissed or 0 }}</b></div>
+            <div><span class="muted">window end</span><b>{{ r.window_end.strftime('%d %b %H:%M') if r.window_end is not none else '—' }}</b></div>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No rollups match — adjust the window or source.</p>
+  {% endif %}
+</div>

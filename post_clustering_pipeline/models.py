@@ -72,6 +72,14 @@ class EmbeddingEngine:
         with torch.no_grad():
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i:i + batch_size]
+                # NOTE: embeddings use the leading 256-token window only.
+                # Windowing/tiling was measured and rejected: for realistic
+                # long-form recaps the head window is always the best topic
+                # representative (0.50/0.27/0.54/0.47 head vs 0.24/0.43 tail
+                # on a live corpus), and pooling tricks regressed some posts
+                # while failing to recover tail-buried keywords. Topics buried
+                # past the window are instead recovered by full-text entity
+                # anchoring during assignment/birth (see assignment.py).
                 inputs = self.tokenizer(
                     batch_texts,
                     return_tensors="pt",
@@ -145,6 +153,9 @@ def reload_adapter(adapter_path: str, *, model_version: str, cur=None) -> bool:
         engine.swap_model(fresh)
         logger.info("adapter swapped: %s -> %s (epoch %s)", _adapter_path, model_version, _last_loaded_at.isoformat())
         return True
+
+
+def get_embedding_engine() -> EmbeddingEngine:
     """Return the process-local engine, loading model weights on first use."""
     global _embedding_engine
     if _embedding_engine is None:
