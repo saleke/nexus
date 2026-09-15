@@ -4,8 +4,6 @@
 
 Nexus is a high-throughput, fault-tolerant streaming and batch machine learning pipeline designed to ingest high-volume social media streams, generate dense semantic representations, dynamically assign posts to evolving **Event Hubs** (thematic clusters), discover emerging stories via temporal graph community detection, and adapt continuously via active learning feedback loops.
 
----
-
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
@@ -25,7 +23,6 @@ Nexus is a high-throughput, fault-tolerant streaming and batch machine learning 
 - [Automated Testing & Benchmarks](#automated-testing--benchmarks)
 - [Production Deployment & Operational Best Practices](#production-deployment--operational-best-practices)
 
----
 
 ## Architecture Overview
 
