@@ -33,7 +33,7 @@ flowchart TD
         Consumer[Event Outbox Consumer]
     end
 
-    subgraph IngestionGateway [Nexus API Gateway :8000]
+    subgraph IngestionGateway ["Nexus API Gateway :8000"]
         API[FastAPI Gateway]
         Pool[Threaded Connection Pool]
         OutboxAPI[Transactional Outbox Service]
@@ -46,8 +46,8 @@ flowchart TD
     subgraph IngestionWorker [Celery Worker Cluster]
         Worker[Ingestion Worker]
         NLP[Spacy Entity & Noise Filter]
-        ModelEngine[Hugging Face MiniLM-L6-v2 + LoRA]
-        CentroidCalc[O(1) Bounded Incremental Centroids]
+        ModelEngine["Hugging Face MiniLM-L6-v2 + LoRA"]
+        CentroidCalc["O(1) Bounded Incremental Centroids"]
     end
 
     subgraph StorageLayer [PostgreSQL 16 + pgvector]
@@ -58,9 +58,9 @@ flowchart TD
     end
 
     subgraph BatchEngine [Batch Intelligence & Active Learning]
-        BirthJob[jobs.event_birth: PyTorch Top-K + Louvain Community Detection]
-        WeeklyJob[jobs.weekly_threshold: Bayesian GP Threshold Optimization]
-        MonthlyJob[jobs.monthly_learner: Contrastive LoRA Fine-Tuning]
+        BirthJob["jobs.event_birth: PyTorch Top-K + Louvain Community Detection"]
+        WeeklyJob["jobs.weekly_threshold: Bayesian GP Threshold Optimization"]
+        MonthlyJob["jobs.monthly_learner: Contrastive LoRA Fine-Tuning"]
         PromoteJob[jobs.promote_model: Production Model Gating]
     end
 
@@ -83,6 +83,7 @@ flowchart TD
     DB --> WeeklyJob
     DB --> MonthlyJob
     MonthlyJob --> PromoteJob
+
 ```
 
 ---
