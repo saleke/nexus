@@ -10,6 +10,15 @@ from .config import BASE_MODEL_NAME, LORA_ADAPTER_DIR, REQUIRE_LORA_ADAPTER, MOD
 
 logger = logging.getLogger(__name__)
 
+# Single-flight lock for the shared CPU embedder. A concurrency-aware
+# `--pool=threads` worker pool previously ran up to 4 encode_batch calls at
+# once on one CPU model; measured end-to-end throughput collapsed from
+# 10.7 posts/s (serial) to ~1.1 posts/s (4-way) - an 10x regression from
+# cache thrash + thread contention. Serializing the whole batch (acquired on
+# ENTRY, released on EXIT, try/finally) restores the serial throughput while
+# still letting non-encode phases of other tasks overlap.
+_ENCODE_FLIGHT_LOCK = threading.Lock()
+
 
 class EmbeddingEngine:
     def __init__(self, base_model_name: str = BASE_MODEL_NAME, adapter_path: str = LORA_ADAPTER_DIR):
@@ -63,37 +72,45 @@ class EmbeddingEngine:
             else:
                 param.requires_grad = False
 
-    def encode_batch(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
-        """Batch encode multiple texts efficiently using vectorized PyTorch operations."""
+    def encode_batch(self, texts: list[str], batch_size: int = 128) -> list[list[float]]:
+        """Batch encode multiple texts efficiently using vectorized PyTorch operations.
+
+        The ENTIRE batch runs under the single-flight lock (see module docstring):
+        one CPU transformer at a time, atomically, regardless of worker pool size.
+        """
         if not texts:
             return []
 
-        all_embeddings: list[list[float]] = []
-        with torch.no_grad():
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i + batch_size]
-                # NOTE: embeddings use the leading 256-token window only.
-                # Windowing/tiling was measured and rejected: for realistic
-                # long-form recaps the head window is always the best topic
-                # representative (0.50/0.27/0.54/0.47 head vs 0.24/0.43 tail
-                # on a live corpus), and pooling tricks regressed some posts
-                # while failing to recover tail-buried keywords. Topics buried
-                # past the window are instead recovered by full-text entity
-                # anchoring during assignment/birth (see assignment.py).
-                inputs = self.tokenizer(
-                    batch_texts,
-                    return_tensors="pt",
-                    truncation=True,
-                    padding=True,
-                    max_length=256
-                )
-                outputs = self.model(**inputs)
-                mask = inputs["attention_mask"].unsqueeze(-1).to(outputs.last_hidden_state.dtype)
-                pooled = (outputs.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-                pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
-                all_embeddings.extend(pooled.cpu().tolist())
+        _ENCODE_FLIGHT_LOCK.acquire()
+        try:
+            all_embeddings: list[list[float]] = []
+            with torch.no_grad():
+                for i in range(0, len(texts), batch_size):
+                    batch_texts = texts[i:i + batch_size]
+                    # NOTE: embeddings use the leading 256-token window only.
+                    # Windowing/tiling was measured and rejected: for realistic
+                    # long-form recaps the head window is always the best topic
+                    # representative (0.50/0.27/0.54/0.47 head vs 0.24/0.43 tail
+                    # on a live corpus), and pooling tricks regressed some posts
+                    # while failing to recover tail-buried keywords. Topics buried
+                    # past the window are instead recovered by full-text entity
+                    # anchoring during assignment/birth (see assignment.py).
+                    inputs = self.tokenizer(
+                        batch_texts,
+                        return_tensors="pt",
+                        truncation=True,
+                        padding=True,
+                        max_length=256
+                    )
+                    outputs = self.model(**inputs)
+                    mask = inputs["attention_mask"].unsqueeze(-1).to(outputs.last_hidden_state.dtype)
+                    pooled = (outputs.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+                    pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+                    all_embeddings.extend(pooled.cpu().tolist())
 
-        return all_embeddings
+            return all_embeddings
+        finally:
+            _ENCODE_FLIGHT_LOCK.release()
 
     def encode(self, text: str) -> list[float]:
         """Encode a single text string."""
@@ -144,14 +161,13 @@ def reload_adapter(adapter_path: str, *, model_version: str, cur=None) -> bool:
         fresh.eval()
         for p in fresh.parameters():
             p.requires_grad = False
-        _adapter_path = adapter_path
         # Atomic rebind: this process serves the fresh weights now.
         _active_model_version = model_version
         _last_loaded_at = datetime.now(timezone.utc)
         _loaded_adapter_path = adapter_path
         # Swap the engine so subsequent encode_batch calls use the new adapter.
         engine.swap_model(fresh)
-        logger.info("adapter swapped: %s -> %s (epoch %s)", _adapter_path, model_version, _last_loaded_at.isoformat())
+        logger.info("adapter swapped: %s -> %s (epoch %s)", _loaded_adapter_path, model_version, _last_loaded_at.isoformat())
         return True
 
 

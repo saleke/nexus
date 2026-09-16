@@ -44,6 +44,36 @@ BIRTH_COHESION_FLOOR = float(os.getenv("BIRTH_COHESION_FLOOR", "0.45"))
 ANCHOR_WEIGHT = float(os.getenv("ANCHOR_WEIGHT", "0.35"))
 CENTROID_MAX_MEMBERS = int(os.getenv("CENTROID_MAX_MEMBERS", "150"))
 
+# Hub reconciliation (merge) judgement. The embedder's same-topic centroid
+# cosine tops out near ~0.71 (mean ~0.57) - the historical 0.90 bar sat above
+# the ceiling and permanently froze repair (0 merges across 34 fragments).
+# A hub pair merges when EITHER the sim bar clears WITHOUT a dominant-ORG
+# conflict veto, OR the similarity floor clears WITH shared identity overlap
+# (ORG/PRODUCT/NORP tokens present on both sides - PERSON is excluded because
+# a shared person like "Musk" spans genuinely distinct Tesla/SpaceX threads).
+MERGE_SIMILARITY_THRESHOLD = float(os.getenv("MERGE_SIMILARITY_THRESHOLD", "0.62"))
+MERGE_ENTITY_FLOOR = float(os.getenv("MERGE_ENTITY_FLOOR", "0.45"))
+# When a hub pair carries NO sanitized identity evidence on either side it can
+# fold only on very high embedding agreement; distinct topics measure well
+# below this (mean cross 0.47, max 0.66).
+MERGE_NO_IDENTITY_SIM = float(os.getenv("MERGE_NO_IDENTITY_SIM", "0.72"))
+# Dominant-ORG veto boundary: when BOTH hubs carry at least one ORG and their
+# ORG sets are disjoint, a high embedding similarity is treated as confusable
+# actor ambiguity (Tesla vs SpaceX, soccer vs cricket) and never merged.
+MERGE_ORG_VETO_MIN_ORGS = int(os.getenv("MERGE_ORG_VETO_MIN_ORGS", "1"))
+
+# Candidate auto-resolution: candidates parked below a confident margin are
+# swept after this age against live hubs (entity-aware tiebreak; bounded per
+# run). 0 disables the sweep.
+CANDIDATE_AUTO_RESOLVE_MINUTES = int(os.getenv("CANDIDATE_AUTO_RESOLVE_MINUTES", "10"))
+CANDIDATE_AUTO_RESOLVE_SIM = float(os.getenv("CANDIDATE_AUTO_RESOLVE_SIM", "0.50"))
+
+# Outbox TTLs: unconsumed 'pending' events age out to 'failed' in pull mode
+# (garbage the consumer never claimed), then failed/delivered rows are pruned
+# after their own TTL so the outbox can never grow without bound.
+OUTBOX_UNCONSUMED_TTL_DAYS = int(os.getenv("OUTBOX_UNCONSUMED_TTL_DAYS", "7"))
+OUTBOX_FAILED_TTL_DAYS = int(os.getenv("OUTBOX_FAILED_TTL_DAYS", "30"))
+
 # Processing & Reliability Settings
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "32"))
 SWEEPER_INTERVAL_SECONDS = int(os.getenv("SWEEPER_INTERVAL_SECONDS", "60"))
@@ -55,7 +85,7 @@ CLAIM_CHUNK_SIZE = int(os.getenv("CLAIM_CHUNK_SIZE", "128"))
 ASSIGN_CHUNK_SIZE = int(os.getenv("ASSIGN_CHUNK_SIZE", "64"))
 
 # Process-local TTL cache for the global similarity threshold to avoid a
-# SELECT per batch; the weekly job updates it at most once a day.
+# SELECT per batch; the daily autotune job updates it at most once a day.
 THRESHOLD_CACHE_TTL_SECONDS = int(os.getenv("THRESHOLD_CACHE_TTL_SECONDS", "60"))
 
 # Bulk assignment matcher: collapses the per-post HNSW + write statements into

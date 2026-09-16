@@ -59,7 +59,7 @@ flowchart TD
 
     subgraph BatchEngine [Batch Intelligence & Active Learning]
         BirthJob["jobs.event_birth: PyTorch Top-K + Louvain Community Detection"]
-        WeeklyJob["jobs.weekly_threshold: Bayesian GP Threshold Optimization"]
+        WeeklyJob["quality.run_threshold_autotune: Versioned Daily Autotune"]
         MonthlyJob["jobs.monthly_learner: Contrastive LoRA Fine-Tuning"]
         PromoteJob[jobs.promote_model: Production Model Gating]
     end
@@ -394,11 +394,8 @@ Runs on an hourly schedule to partition unclustered buffered posts into 1-hour t
 python -m post_clustering_pipeline.jobs.event_birth
 ```
 
-### 2. Weekly Bayesian Threshold Optimization (`jobs.weekly_threshold`)
-Optimizes the runtime `global_similarity_threshold` using Gaussian Process minimization (`gp_minimize`) over the last 7 days of user feedback, penalizing false positives 5:1 against false negatives:
-```bash
-python -m post_clustering_pipeline.jobs.weekly_threshold
-```
+### 2. Quality Rollups & Daily Threshold Autotune (`quality`)
+Rolls human + system decisions up into `feedback_rollups` every few minutes and, daily, replays human feedback through the *versioned* calibration path (`policy.py`) to propose (or auto-apply, when `AUTO_APPLY_THRESHOLD=true`) a `global_similarity_threshold` revision. These are the beat tasks `quality-rollup-every-5m` and `threshold-autotune-daily` — there is no standalone runner, and the threshold is only ever mutated through `policy_history`.
 
 ### 3. Monthly LoRA Contrastive Learner (`jobs.monthly_learner`)
 Fine-tunes the PEFT LoRA adapter on human-in-the-loop unlinking feedback (`user_removed`) using raw text sequence tokenization and Triplet Margin Loss:

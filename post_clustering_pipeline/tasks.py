@@ -5,7 +5,7 @@ from .models import get_embedding_engine
 from .events import write_outbox
 from .embed_io import vector_to_array_literal, parse_vector_literal
 from .chunks import iter_chunks
-from .assignment import assign_valid_for_encoding
+from .assignment import assign_valid_for_encoding, resolve_stale_candidates
 from .decisions import log_decision
 from .centroid import bounded_rolling_centroid, anchor_blended_centroid, normalize
 from .policy import current_versions
@@ -309,6 +309,7 @@ def reconcile_pending_posts(batch_limit: int = 200):
     """
     reset_stale = _reset_stale_processing()
     dispatched = _dispatch_pending_posts(batch_limit)
+    auto_resolve = resolve_stale_candidates(batch_limit)
 
     # Staleness advisory: pending rows that are far older than normal drain
     # latency indicate a stuck hint/sweeper path - one lightweight count so the
@@ -327,7 +328,8 @@ def reconcile_pending_posts(batch_limit: int = 200):
         row = cur.fetchone()
         stalled_pending = extract_val(row, "stalled", 0) or 0
 
-    return {"reconciled": dispatched, "reset_stale": reset_stale, "stalled_pending": stalled_pending}
+    return {"reconciled": dispatched, "reset_stale": reset_stale, "stalled_pending": stalled_pending,
+            "auto_resolved": auto_resolve.get("resolved", 0)}
 
 
 @celery_app.task(name="post_clustering_pipeline.tasks.run_event_birth_scheduled")
@@ -338,7 +340,14 @@ def run_event_birth_scheduled():
             return {"status": "skipped", "reason": "Job already running"}
         from .jobs.event_birth import run_clustering_pipeline
         run_clustering_pipeline()
-        return {"status": "completed"}
+        # Repair is part of birth, not a separate beat: community detection
+        # over-splits a topic into fragments (measured up to 34 hubs for 10
+        # topics), so folding the duplicates immediately after creation keeps
+        # the next assignment wave matching against merged centroids instead of
+        # re-littering the candidate pile.
+        from .jobs.merge_hubs import reconcile_hub_merges
+        merged = reconcile_hub_merges()
+        return {"status": "completed", "merged_hubs": merged}
 
 
 @celery_app.task(name="post_clustering_pipeline.tasks.run_hub_merge_scheduled")
@@ -354,8 +363,38 @@ def run_hub_merge_scheduled():
 
 @celery_app.task(name="post_clustering_pipeline.tasks.prune_delivered_outbox")
 def prune_delivered_outbox(retention_days: int = 7):
-    """Prune acknowledged integration events older than retention period."""
-    with get_db_cursor() as cur:
+    """Prune acknowledged integration events older than retention period, and
+    bound outbox growth in pull mode: unconsumed 'pending' events older than
+    OUTBOX_UNCONSUMED_TTL_DAYS that are NOT leased to an active consumer age out
+    to 'failed' (an event the integration never claimed), then failed rows are
+    pruned after OUTBOX_FAILED_TTL_DAYS. Otherwise an inactive integration pool
+    (0 consumers, 1,316 rows and growing) would grow without bound."""
+    from .config import OUTBOX_UNCONSUMED_TTL_DAYS, OUTBOX_FAILED_TTL_DAYS
+    with get_db_cursor(commit=True) as cur:
+        cur.execute(
+            """
+            UPDATE integration_outbox
+            SET delivery_status = 'failed', last_error = 'unconsumed_event',
+                attempts = attempts + 1, lease_until = NULL
+            WHERE delivery_status = 'pending'
+              AND available_at < NOW() - (%s * INTERVAL '1 day')
+              AND NOT (consumer IS NOT NULL AND lease_until > NOW());
+            """,
+            (OUTBOX_UNCONSUMED_TTL_DAYS,)
+        )
+        aged_out = cur.rowcount
+
+        cur.execute(
+            """
+            DELETE FROM integration_outbox
+            WHERE delivery_status = 'failed'
+              AND last_error = 'unconsumed_event'
+              AND created_at < NOW() - (%s * INTERVAL '1 day');
+            """,
+            (OUTBOX_FAILED_TTL_DAYS,)
+        )
+        pruned_failed = cur.rowcount
+
         cur.execute(
             """
             DELETE FROM integration_outbox
@@ -365,7 +404,7 @@ def prune_delivered_outbox(retention_days: int = 7):
             (retention_days,)
         )
         deleted = cur.rowcount
-    return {"pruned_outbox_events": deleted}
+    return {"pruned_outbox_events": deleted, "aged_out": aged_out, "pruned_failed": pruned_failed}
 
 
 @celery_app.task(name="post_clustering_pipeline.tasks.run_quality_rollup_scheduled")

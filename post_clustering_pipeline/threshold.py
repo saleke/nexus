@@ -1,7 +1,8 @@
 """Dynamic global similarity threshold (with process-local TTL cache).
 
 The threshold is read from the DB but refreshed at most once per TTL to avoid
-a SELECT per batch; the weekly maintenance job updates it at most once a day.
+a SELECT per batch; the daily control-plane autotuner (`run_threshold_autotune`
+in quality.py) updates it at most once a day.
 """
 from __future__ import annotations
 

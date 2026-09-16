@@ -10,6 +10,7 @@ from ..embed_io import vector_to_array_literal, parse_vector_literal
 from ..centroid import bounded_rolling_centroid, normalize
 from ..refs import title_from_seed, unique_handle
 from ..membership import record_membership
+from ..nlp import identity_entity_tokens
 from ..config import (
     BIRTH_ASSIGN_THRESHOLD,
     BIRTH_SIMILARITY_FLOOR,
@@ -147,7 +148,10 @@ def _entity_split_components(cur, post_ids: list[int]) -> list[list[int]]:
     for r in (cur.fetchall() or []):
         pid = extract_val(r, "id", 0)
         vals = extract_val(r, "entities", 1) or []
-        strong = {str(v) for v in vals if v}
+        # Sanitized identity evidence only: generic collective tokens
+        # (insiders/fans/critics/observers) span every topic and would chain
+        # distinct communities into one component, defeating the split.
+        strong = identity_entity_tokens(vals)
         if strong:
             ents[pid] = strong
 

@@ -4,6 +4,27 @@ import spacy
 # Load spaCy with parser and lemmatizer disabled for high-throughput tagging & entity detection
 nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
 
+# Emoji / pictograph strip BEFORE NER + word count. spaCy en_core_web_sm tags
+# standalone emoji as ORG/PRODUCT ("🚀" -> ORG:🚀), which used to admit
+# emoji-only noise as a "named entity" post. Every pass below operates on the
+# stripped text so the gate and the stored entity set see the same tokens the
+# embedder sees.
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"   # misc symbols & pictographs + supplemental symbols
+    "\U0001F000-\U0001F02F"   # mahjong / domino / dice tiles
+    "\U00002600-\U000027BF"   # misc symbols + dingbats (incl. hearts/stars)
+    "\U00002190-\U000021FF"   # arrows (headline decoration)
+    "\U00002B00-\U00002BFF"   # misc symbols & arrows (incl. the 2B50 star)
+    "\uFE0F"                  # variation selector (emoji presentation)
+    "\u200D"                  # zero-width joiner (ZWJ sequences)
+    "]+"
+)
+
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_PATTERN.sub(" ", text)
+
 VALID_ENTITY_LABELS = {
     "PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT", "NORP", "FAC"
 }
@@ -18,6 +39,55 @@ VALID_ENTITY_LABELS = {
 STRONG_ENTITY_LABELS = {
     "PERSON", "ORG", "PRODUCT", "NORP"
 }
+
+# Identity evidence for the merge/tiebreak/split machinery. PERSON is included
+# because actor threads are often person-anchored (cricket follows "Bumrah",
+# tech follows "Musk"); without PERSON, such posts carry NO identity and ride
+# the embedding-majority component at birth, gluing distinct threads together.
+# The person-sharing hazard (Musk spanning Tesla vs SpaceX) is neutralized by
+# (a) GENERIC_ENTITY_HEADS stripping template junk and (b) the ORG-conflict
+# veto in the merge judge, which already separates disjoint-actor hubs.
+IDENTITY_LABELS = {"ORG", "PRODUCT", "NORP", "PERSON"}
+
+# Generic collective head nouns that ANY discourse template emits as entities
+# ("insiders", "observers", "supporters", "fans", "critics"). They appear in
+# every topic (measured: ORG:insiders on 80 posts across all 5 sim topics), so
+# they must never count as identity evidence - leaving them in makes every hub
+# pair "share identity" and collapses distinct events into one hub.
+GENERIC_ENTITY_HEADS = {
+    "insiders", "observers", "supporters", "fans", "critics", "skeptics",
+    "defenders", "detractors", "pundits", "experts", "analysts", "authorities",
+    "officials", "sources", "advisors", "lawmakers", "leaders", "members",
+    "followers", "community", "investors",
+}
+
+
+def identity_entity_tokens(entities, *, org_only: bool = False) -> set[str]:
+    """Sanitized ORG/PRODUCT/NORP identity tokens (``LABEL:value``) for asks.
+
+    Used by hub-merge overlap, entity-conflict vetoes, assignment tiebreaks,
+    and birth's entity split. Drops: PERSON evidence, tokens with no alphabetic
+    content, and tokens that reference a generic collective head noun (which
+    are shared across topics and would fabricate universal identity overlap).
+    """
+    out: set[str] = set()
+    for e in entities or []:
+        e = str(e or "")
+        if ":" not in e:
+            continue
+        label, _, value = e.partition(":")
+        if label not in IDENTITY_LABELS:
+            continue
+        if org_only and label != "ORG":
+            continue
+        value = value.strip().lower()
+        words = value.split()
+        if not words or not any(ch.isalpha() for ch in value):
+            continue
+        if any(w in GENERIC_ENTITY_HEADS for w in words):
+            continue
+        out.add(f"{label}:{value}")
+    return out
 
 # Chatting / banality markers indicating low-information casual posts
 CHATTER_PATTERNS = [
@@ -54,6 +124,58 @@ DEBATE_DISCOURSE_PATTERNS = [
     r"\bpolicy\b",
 ]
 
+# Modality: the skeleton of any claim, independent of capitalization or a fixed
+# word list ("should", "will", "may"). Universal quantifiers ("every", "all",
+# "most", "many", "always") are deliberately NOT admission evidence - they
+# appear constantly in substance-free filler ("a lot of stuff happened today",
+# "this is basically me every morning") and leaked adversarial noise in testing.
+SIGNAL_MODAL_QUANTIFIER_PATTERNS = [
+    r"\b(?:should|shouldn't|shouldnt|could|couldn't|couldnt|must|ought to|will|won't|wont|would|wouldn't|wouldnt|may|might)\b",
+    r"\b(?:never|always)\b",
+]
+
+# Topical signal verbs + nouns (lemma-irrelevant: inflections listed). These
+# admit a real event/claim regardless of named entities, capitalization, or a
+# whether-word: "Diversity drives innovation, period." clears via "drives"
+# even though it has zero entities and no debate marker. Case-insensitive.
+SIGNAL_VERBS = {
+    "drives", "drive", "driving", "boosted", "boosts", "surges", "surged",
+    "surge", "spikes", "spiked", "spike", "plunges", "plunged", "crashes",
+    "crashed", "announces", "announced", "unveils", "unveiled", "launches",
+    "launched", "warns", "warned", "claims", "claimed", "criticizes",
+    "criticized", "praises", "praised", "awards", "awarded", "approves",
+    "approved", "rejects", "rejected", "vetoes", "vetoed", "passes", "passed",
+    "votes", "voted", "negotiates", "negotiated", "signs", "signed", "strikes",
+    "struck", "reports", "reported", "confirms", "confirmed", "denies",
+    "denied", "reveals", "revealed", "publishes", "published", "releases",
+    "released", "beats", "defeats", "defeated", "wins", "won", "loses", "lost",
+    "resigns", "resigned", "retires", "retired", "raises", "raised", "hikes",
+    "hiked", "cuts", "cut", "falls", "fell", "jumps", "jumped", "sells",
+    "sold", "buys", "bought", "merges", "merged", "acquires", "acquired",
+    "invests", "invested", "grows", "grew", "drops", "dropped", "doubles",
+    "doubled", "tests", "tested", "studies", "studied", "finds", "found",
+    "shows", "showed", "proves", "proved", "suggests", "suggested",
+    "recommends", "recommended", "bans", "banned", "legalizes", "legalized",
+    "indicts", "indicted", "convicts", "convicted", "blames", "blamed",
+    "survives", "survived", "recovers", "recovered", "collapses", "collapsed",
+    "closes", "closed", "opens", "opened", "hires", "hired", "fires", "fired",
+    "wins", "tops", "leads", "led", "overtakes", "overtook", "calls", "called",
+    "plans", "planned", "aims", "vows", "pledges", "pledged", "promises",
+    "promised",
+}
+
+SIGNAL_NOUNS = {
+    "news", "report", "reports", "result", "results", "update", "updates",
+    "launch", "verdict", "election", "vote", "votes",
+    "ruling", "proposal", "reform", "crisis", "scandal", "alert", "warning",
+    "announcement", "interview", "analysis", "study", "surveys", "survey",
+    "ban", "lawsuit", "tariff", "verdict", "agreement", "settlement",
+    "shortage", "outbreak", "suspension", "ceasefire", "rounds", "round",
+    "race", "match", "series", "tournament", "season", "winner", "record",
+}
+
+SIGNAL_LEXICON = SIGNAL_VERBS | SIGNAL_NOUNS
+
 
 def _discourse_analysis(text: str) -> tuple[bool, str, list[str]]:
     """Single spaCy pass that both gates the post and extracts strong entities
@@ -63,6 +185,7 @@ def _discourse_analysis(text: str) -> tuple[bool, str, list[str]]:
         return False, "empty_text", []
 
     cleaned = text.strip()
+    cleaned = _strip_emoji(cleaned)
     words = cleaned.split()
     if len(words) < 7:
         return False, "too_short", []
@@ -93,16 +216,34 @@ def _discourse_analysis(text: str) -> tuple[bool, str, list[str]]:
 
     # 3. Check for debate, proposition, or question markers
     has_debate_markers = any(bool(re.search(pat, lower)) for pat in DEBATE_DISCOURSE_PATTERNS)
+    has_modal_quantifier = any(bool(re.search(pat, lower)) for pat in SIGNAL_MODAL_QUANTIFIER_PATTERNS)
     has_question = "?" in cleaned
 
-    # 4. Check for real-world entities or proper nouns (news/events)
-    has_entities = any(ent.label_ in VALID_ENTITY_LABELS for ent in doc.ents)
-    has_proper_nouns = any(token.pos_ == "PROPN" for token in doc)
+    # 4. Check for real-world entities or proper nouns (news/events).
+    # Lowercase PERSON labels are a known spaCy hallucination on word-salad
+    # ("asoidj kajsdlk lkajd" -> PERSON), so PERSON must be capitalized to count;
+    # lowercase ORG/GPE/NORP/etc. stay valid ("fed", "china", "bitcoin").
+    has_entities = any(
+        ent.label_ in VALID_ENTITY_LABELS
+        and (ent.text[0].isupper() or ent.label_ != "PERSON")
+        for ent in doc.ents
+    )
+    has_proper_nouns = any(
+        token.pos_ == "PROPN" and (token.text[0].isupper() or token.text.isupper())
+        for token in doc
+    )
+
+    # 5. Topical signal lexicon (verbs/nouns of events, claims, results, deals)
+    has_signal_lexicon = any(w in SIGNAL_LEXICON for w in lower.split())
 
     # Admission rule:
-    # A post passes if it has substantive entities/proper nouns OR structured debate/idea markers,
-    # provided it was not rejected as personal chatter above.
-    if has_entities or has_proper_nouns or has_debate_markers or has_question:
+    # A post passes if it carries substantive entities/proper nouns OR a
+    # structured claim/question (debate markers, modality, quantification) OR a
+    # topical signal verb/noun. Genuine discussion is admitted regardless of
+    # capitalization or a fixed phrase list; only truly blank prose - no named
+    # thing, no claim structure, no event lexicon - is dropped as chatter.
+    if (has_entities or has_proper_nouns or has_debate_markers
+            or has_modal_quantifier or has_signal_lexicon or has_question):
         return True, "valid_discourse", strong_entities
 
     return False, "lacks_substance", []
@@ -130,16 +271,17 @@ def extract_strong_entities(text: str) -> list[str]:
 
 
 def entities_conflict(post_entities, hub_entities) -> bool:
-    """Do two sets of strong entities describe different actors?
+    """Do two sets of identity entities describe different actors?
 
     Conflict (the posts likely describe DIFFERENT events) only when BOTH sides
-    carry identity entities and the sets are disjoint. Empty side on either
-    side means 'no evidence' -> no veto.
+    carry sanitized ORG/PRODUCT/NORP identity evidence and the sets are
+    disjoint. Empty side on either side means 'no evidence' -> no veto.
+    Generic collective tokens (insiders/fans/critics...) are stripped first -
+    they are shared by every topic and would suppress the vetoes that keep
+    distinct events apart.
     """
-    if not post_entities or not hub_entities:
-        return False
-    ps = set(str(e).strip().lower() for e in post_entities if e)
-    hs = set(str(e).strip().lower() for e in hub_entities if e)
+    ps = identity_entity_tokens(post_entities)
+    hs = identity_entity_tokens(hub_entities)
     if not ps or not hs:
         return False
     return ps.isdisjoint(hs)

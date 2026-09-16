@@ -561,7 +561,7 @@ async def panel_invite_admin(request: Request):
         log_admin_action(cur, claim["email"], "admin.invite", "admin_users",
                          created["id"], {"email": email}, {})
     try:
-        with open("/tmp/alithos-admin-invites.log", "a", encoding="utf-8") as fh:
+        with open("/tmp/nexus-admin-invites.log", "a", encoding="utf-8") as fh:
             fh.write(f"[{claim['email']}] invited {email} -> {link}\n")
     except OSError:
         pass
@@ -908,7 +908,6 @@ async def refs_fragment(request: Request, q: str = "", kind: str = "hub", limit:
 # A soft ceiling on how many hub centroids we compare pairwise per render. The
 # graph keeps degrading gracefully beyond this, but the desk/quality network is
 # a monitoring lens, not a warehouse query.
-_HUB_GRAPH_MAX_EDGES = 40
 _GRAPH_TYPE_COLORS = {
     "event": "#58a6ff",
     "debate": "#d29922",

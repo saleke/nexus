@@ -16,6 +16,7 @@ from psycopg2.extras import execute_values
 from .config import (
     SIMILARITY_MARGIN,
     CANDIDATE_THRESHOLD,
+    CANDIDATE_AUTO_RESOLVE_SIM,
     CENTROID_UPDATE_THRESHOLD,
     ASSIGN_CHUNK_SIZE,
     BULK_ASSIGN,
@@ -26,7 +27,7 @@ from .decisions import log_decision, log_decisions_bulk
 from .embed_io import vector_to_array_literal
 from .events import write_outbox
 from .membership import record_membership, record_memberships
-from .nlp import entities_conflict
+from .nlp import entities_conflict, identity_entity_tokens
 from .policy import current_versions
 from .threshold import get_effective_threshold
 
@@ -89,6 +90,36 @@ def _margin_budget(sim: float | None, runner_sim: float | None, threshold: float
     if runner_sim is not None:
         return round(float(sim - runner_sim), 4)
     return round(float(sim - threshold), 4)
+
+
+def _identity_tokens(entities) -> set[str]:
+    """Sanitized ORG/PRODUCT/NORP identity tokens of a post or hub.
+
+    Shares the identity contract with hub-merge and birth's entity split
+    (``nlp.identity_entity_tokens``): generic collective tokens
+    (insiders/fans/critics/observers) are stripped so they cannot fabricate a
+    tiebreak, and PERSON is excluded - a shared person (e.g. "Musk") spans
+    genuinely distinct threads (Tesla vs SpaceX)."""
+    return identity_entity_tokens(entities)
+
+
+def _entity_tiebreak(post_entities, hub_entities_best, hub_entities_runner) -> str | None:
+    """Pick the hub a borderline post belongs to, on identity evidence.
+
+    Returns ``"best"`` / ``"runner"`` when the top-2 hubs split on identity -
+    exactly one shares an ORG/PRODUCT/NORP token with the post. Returns ``None``
+    when neither side is decisive (post has no identity tokens, both share, or
+    neither shares), leaving the post parked in the candidate band."""
+    post_id = _identity_tokens(post_entities)
+    if not post_id:
+        return None
+    best_share = post_id & _identity_tokens(hub_entities_best)
+    runner_share = post_id & _identity_tokens(hub_entities_runner)
+    if best_share and not runner_share:
+        return "best"
+    if runner_share and not best_share:
+        return "runner"
+    return None
 
 
 def decide_assignment(similarity: float | None, runner_similarity: float | None, threshold: float):
@@ -264,9 +295,30 @@ def _assign_chunk_bulk(item_chunk, vec_chunk, *, assigned_count, hub_centroid_up
                 is_assigned, status, confidence = decide_assignment(sim, runner_sim, threshold)
                 event_id = best_eid if is_assigned else None
                 reason_override = None
+
+                # Entity-informed tiebreak: a post in the candidate band whose
+                # ORG/PRODUCT/NORP identity provably belongs to exactly one of
+                # the top-2 hubs is not ambiguous - it is a borderline match to
+                # the RIGHT hub. Assign it there instead of parking it (drains
+                # the candidate pile without lowering the assignment bar).
+                if (not is_assigned and status == "candidate"
+                        and best_eid is not None and sim is not None
+                        and sim >= CANDIDATE_AUTO_RESOLVE_SIM):
+                    runner_eid = matches[1][0] if len(matches) > 1 else None
+                    tiebreak_kind = _entity_tiebreak(
+                        post_entities.get(pid, []),
+                        hub_entities.get(best_eid, set()),
+                        hub_entities.get(runner_eid, set()) if runner_eid is not None else set(),
+                    )
+                    if tiebreak_kind:
+                        event_id = best_eid if tiebreak_kind == "best" else runner_eid
+                        confidence = sim if tiebreak_kind == "best" else runner_sim
+                        is_assigned, status = True, "assigned"
+                        reason_override = "entity_tiebreak"
+
                 if is_assigned and entities_conflict(
                     post_entities.get(pid, []),
-                    hub_entities.get(best_eid, set()),
+                    hub_entities.get(event_id, set()),
                 ):
                     # Embeddings cannot separate confusable actor threads
                     # (e.g. Apple vs Samsung launch) - identical semantics,
@@ -323,7 +375,7 @@ def _assign_chunk_bulk(item_chunk, vec_chunk, *, assigned_count, hub_centroid_up
                 )
                 if is_assigned:
                     feedback_rows.append((pid, event_id, confidence))
-                    if sim >= CENTROID_UPDATE_THRESHOLD:
+                    if confidence >= CENTROID_UPDATE_THRESHOLD:
                         hub_centroid_updates[event_id].append(vector)
                     hub_membership_increments[event_id] += 1
                     assigned_count += 1
@@ -507,6 +559,212 @@ def _assign_chunk_rowwise(item_chunk, vec_chunk, *, assigned_count, hub_centroid
                 )
                 print(f"[Worker] Isolated poison pill post #{pid}: {row_exc}")
     return assigned_count
+
+
+def _bulk_update_candidate_final(cur, rows: list[tuple[int, int | None, float | None]]):
+    """Finalize swept candidates (CAS on 'candidate' so the sweep never
+    clobbers a post the pipeline has already finalized)."""
+    if not rows:
+        return []
+    execute_values(
+        cur,
+        """
+        UPDATE posts AS p
+        SET event_id = v.eid, assignment_status = 'assigned',
+            assignment_confidence = v.conf, assignment_updated_at = NOW()
+        FROM (VALUES %s) AS v(id, eid, conf)
+        WHERE p.id = v.id AND p.assignment_status = 'candidate'
+        RETURNING p.id
+        """,
+        rows,
+        template="(%s::int, %s::int, %s::numeric)",
+    )
+    return [extract_val(r, "id", 0) for r in (cur.fetchall() or [])]
+
+
+def resolve_stale_candidates(batch_limit: int = 200) -> dict:
+    """Sweep aged 'candidate' posts to a final status.
+
+    Candidates lingered indefinitely (measured: 36% of a corpus) parked on a
+    single threshold-margin miss. After ``CANDIDATE_AUTO_RESOLVE_MINUTES`` they
+    are re-evaluated once more against live hubs: a confident match or an
+    entity tiebreak assigns them (``auto_resolve_candidate`` / ``entity_tiebreak``),
+    otherwise they become 'unassigned' - genuinely ambiguous posts stay
+    available to future births in the unclustered buffer instead of rotting in
+    the candidate pile. Everything is journaled and outbox-ed like any other
+    final status.
+    """
+    from .config import CANDIDATE_AUTO_RESOLVE_MINUTES
+    if CANDIDATE_AUTO_RESOLVE_MINUTES <= 0:
+        return {"resolved": 0, "assigned": 0, "unassigned": 0}
+
+    with get_db_cursor(commit=True) as cur:
+        cur.execute(
+            """
+            SELECT id
+            FROM posts
+            WHERE assignment_status = 'candidate'
+              AND event_id IS NULL
+              AND assignment_updated_at < NOW() - (%s * INTERVAL '1 minute')
+            ORDER BY assignment_updated_at ASC
+            LIMIT %s;
+            """,
+            (CANDIDATE_AUTO_RESOLVE_MINUTES, batch_limit),
+        )
+        candidates = [int(extract_val(r, "id", 0)) for r in (cur.fetchall() or [])]
+        if not candidates:
+            return {"resolved": 0, "assigned": 0, "unassigned": 0}
+
+        threshold = get_effective_threshold(cur)
+        pv, mv = current_versions(cur)
+        groups = _bulk_match(cur, candidates)
+        matched_hub_ids = {eid for vals in groups.values() for eid, _ in vals if eid}
+        hub_entities = _hub_strong_entities(cur, matched_hub_ids)
+        post_entities = _post_strong_entities(cur, candidates)
+
+        decisions = []  # (pid, event_id, status, confidence, sim, runner_sim, reason)
+        for pid in candidates:
+            matches = groups.get(pid, [])
+            best_eid, sim = matches[0] if matches else (None, None)
+            runner_eid = matches[1][0] if len(matches) > 1 else None
+            runner_sim = matches[1][1] if len(matches) > 1 else None
+
+            is_assigned, status, confidence = decide_assignment(sim, runner_sim, threshold)
+            event_id = best_eid if is_assigned else None
+            reason = "auto_resolve_candidate"
+
+            if is_assigned and entities_conflict(
+                post_entities.get(pid, []),
+                hub_entities.get(event_id, set()),
+            ):
+                is_assigned = False
+                status = "candidate"
+                event_id = None
+                reason = "auto_resolve_entity_conflict"
+
+            if (not is_assigned and status == "candidate" and best_eid is not None
+                    and sim is not None and sim >= CANDIDATE_AUTO_RESOLVE_SIM):
+                tiebreak_kind = _entity_tiebreak(
+                    post_entities.get(pid, []),
+                    hub_entities.get(best_eid, set()),
+                    hub_entities.get(runner_eid, set()) if runner_eid is not None else set(),
+                )
+                if tiebreak_kind:
+                    event_id = best_eid if tiebreak_kind == "best" else runner_eid
+                    confidence = sim if tiebreak_kind == "best" else runner_sim
+                    if not entities_conflict(post_entities.get(pid, []), hub_entities.get(event_id, set())):
+                        is_assigned, status = True, "assigned"
+                        reason = "entity_tiebreak"
+
+            if not is_assigned:
+                if status == "candidate":
+                    status = "unassigned"
+                event_id = None
+                reason = "auto_resolve_unassigned"
+
+            decisions.append((pid, event_id, status, confidence, sim, runner_sim, reason))
+
+        assigned_raw = [(pid, eid, conf) for pid, eid, status, conf, *_ in decisions if status == "assigned"]
+        assigned_updated = _bulk_update_candidate_final(cur, assigned_raw)
+        assigned_ids = set(assigned_updated)
+
+        unassigned_ids = [pid for pid, _, status, _, _, _, _ in decisions if status == "unassigned"]
+        unassigned_updated: set[int] = set()
+        if unassigned_ids:
+            execute_values(
+                cur,
+                """
+                UPDATE posts AS p
+                SET assignment_status = v.st, assignment_confidence = v.conf,
+                    assignment_updated_at = NOW()
+                FROM (VALUES %s) AS v(id, st, conf)
+                WHERE p.id = v.id AND p.assignment_status = 'candidate'
+                RETURNING p.id
+                """,
+                [(pid, "unassigned", None) for pid in unassigned_ids],
+                template="(%s::int, %s::text, %s::numeric)",
+            )
+            unassigned_updated = {extract_val(r, "id", 0) for r in (cur.fetchall() or [])}
+
+        record_memberships(cur, [
+            (pid, event_id, "member")
+            for pid, event_id, status, _, _, _, _ in decisions
+            if status == "assigned" and pid in assigned_ids
+        ])
+
+        outbox_rows = []
+        feedback_rows = []
+        decision_rows = []
+        for pid, event_id, status, confidence, sim, runner_sim, reason in decisions:
+            if status == "assigned":
+                if pid not in assigned_ids:
+                    continue
+                event_type = "post.assigned"
+            else:
+                if pid not in unassigned_updated:
+                    continue
+                event_type = "post.unassigned"
+                event_id = None
+            outbox_rows.append(
+                (event_type, pid, event_id, _assign_payload_dict(event_type, pid, event_id, confidence))
+            )
+            decision_rows.append(
+                (pid, event_id, sim, runner_sim, threshold,
+                 _margin_budget(sim, runner_sim, threshold), status,
+                 confidence, pv, mv, reason)
+            )
+            if status == "assigned":
+                feedback_rows.append((pid, event_id, confidence))
+
+        if outbox_rows:
+            from .events import bump_post_seqs, _seq_payload
+            outbox_seqs = bump_post_seqs(cur, [r[1] for r in outbox_rows])
+            outbox_rows = [
+                (r[0], r[1], r[2], json.dumps(_seq_payload(r[3], outbox_seqs.get(r[1]))))
+                for r in outbox_rows
+            ]
+            execute_values(
+                cur,
+                """
+                INSERT INTO integration_outbox (event_type, post_id, event_id, payload, schema_version)
+                SELECT v.etype, v.pid, v.eid, v.payload::jsonb, 2
+                FROM (VALUES %s) AS v(etype, pid, eid, payload)
+                ON CONFLICT (post_id, event_type) WHERE post_id IS NOT NULL
+                DO UPDATE SET event_id = EXCLUDED.event_id, payload = EXCLUDED.payload,
+                              schema_version = 2,
+                              delivery_status = 'pending', attempts = 0, available_at = NOW()
+                """,
+                outbox_rows,
+                template="(%s::text, %s::int, %s::int, %s::jsonb)",
+            )
+        if feedback_rows:
+            execute_values(
+                cur,
+                """
+                INSERT INTO clustering_feedback_log (post_id, event_id, initial_similarity_score, feedback_type)
+                SELECT v.pid, v.eid, v.conf, 'auto_confirmed'
+                FROM (VALUES %s) AS v(pid, eid, conf)
+                """,
+                feedback_rows,
+                template="(%s::int, %s::int, %s::numeric)",
+            )
+        if decision_rows:
+            log_decisions_bulk(cur, decision_rows)
+        if unassigned_updated:
+            cur.execute(
+                """
+                INSERT INTO unclustered_posts_buffer (post_id, embedding)
+                SELECT id, embedding FROM posts WHERE id = ANY(%s::int[])
+                ON CONFLICT (post_id) DO NOTHING;
+                """,
+                (sorted(unassigned_updated),)
+            )
+
+    return {
+        "resolved": len(assigned_ids) + len(unassigned_updated),
+        "assigned": len(assigned_ids),
+        "unassigned": len(unassigned_updated),
+    }
 
 
 def assign_valid_for_encoding(valid_for_encoding, embeddings):

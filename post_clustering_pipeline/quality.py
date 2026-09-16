@@ -200,15 +200,28 @@ def run_window_rollup() -> dict:
 
     ``end`` is truncated to the hour boundary so repeated runs upsert the same
     row (idempotent) instead of spawning a window that shifts every tick.
+
+    A second, LIVE partial row covers [top of current hour, now) - its window_end
+    grows each tick. Fresh zeros in that row mean 'idle with nothing arriving',
+    the absence of the row means 'rollup never ran', and stale non-zero values
+    mean 'ingestion stalled' - so the metrics panel can distinguish the three
+    signals instead of reading a single closed-hour row that lags 60 minutes.
     """
     from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
     end = now.replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(hours=ROLLUP_WINDOW_HOURS)
+    live_start = end  # top of the current (partial) hour
     with get_db_cursor(commit=True) as cur:
         compute_rollups(cur, start, end)
-    return {"window_start": start.isoformat(), "window_end": end.isoformat()}
+        compute_rollups(cur, live_start, now)
+    return {
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+        "live_start": live_start.isoformat(),
+        "live_end": now.isoformat(),
+    }
 
 
 def run_threshold_autotune() -> dict:
@@ -234,7 +247,7 @@ def run_threshold_autotune() -> dict:
             SELECT d.similarity, f.label
             FROM fb f
             JOIN assignment_decision_log d ON d.post_id = f.post_id AND d.status = 'assigned'
-            WHERE f.rn = 1 AND d.label IS NOT NULL AND d.similarity IS NOT NULL
+            WHERE f.rn = 1 AND f.label IS NOT NULL AND d.similarity IS NOT NULL
               AND COALESCE(f.policy_version, 'unknown') = %s
               AND COALESCE(f.model_version, 'unknown') = %s;
             """,
