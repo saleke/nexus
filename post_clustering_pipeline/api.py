@@ -1,6 +1,9 @@
 import uuid
 import hmac
 import os
+import logging
+from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,9 +24,81 @@ from .corrections import unlink_post as unlink_correction, confirm_post as confi
 from .consumers import authenticate_consumer, rate_limit_check
 from .admin import router as admin_router
 
-app = FastAPI(title="Nexus Event Clustering Platform API")
+from . import config as _cfg
+
+log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Fail-stop guard: a production deployment without the shared API token is
+    almost certainly a misconfiguration that would expose the feed's control
+    plane. Refuse to serve instead of serving open."""
+    if _cfg.PRODUCTION and not API_AUTH_TOKEN:
+        raise RuntimeError(
+            "NEXUS_ENV=production requires API_AUTH_TOKEN. Refusing to serve "
+            "unauthenticated traffic. Set a strong shared token, e.g. "
+            "`openssl rand -hex 32`, and restart."
+        )
+    yield
+
+
+app = FastAPI(title="Nexus Event Clustering Platform API", lifespan=_lifespan)
 app.include_router(admin_router)
 app.mount("/admin/static", StaticFiles(directory=os.path.join(PACKAGE_DIR, "static")), name="admin_static")
+
+# Defense-in-depth response headers. The admin panel needs inline scripts/styles,
+# so script-src/style-src include 'unsafe-inline'; CSP still blocks external
+# script injection, data exfiltration images, plugin objects and clickjacking.
+# cdn.jsdelivr.net serves the /docs + /redoc assets, and the admin panel loads
+# three.js from cdnjs.cloudflare.com; fonts.googleapis.com/gstatic.com and the
+# fastapi.tiangolo.com favicon are needed by the auto-generated docs pages only.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "img-src 'self' data: https://fastapi.tiangolo.com; "
+    "font-src 'self' https://fonts.gstatic.com; connect-src 'self'; media-src 'self'; "
+    "object-src 'none'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"
+)
+
+_missing_token_warned = False
+
+
+def _same_origin(request: Request, origin: str) -> bool:
+    """True when ``origin`` matches the request's own host (default ports
+    normalized) or an explicitly trusted origin."""
+    def _norm(value: str) -> str:
+        value = value.strip().rstrip("/")
+        try:
+            parts = urlsplit(value)
+            host = (parts.hostname or "").lower()
+            port = parts.port
+            if port is None:
+                port = 443 if parts.scheme.lower() == "https" else 80
+        except ValueError:
+            return value.lower()
+        if port in (80, 443):
+            return f"{parts.scheme.lower()}://{host}"
+        return f"{parts.scheme.lower()}://{host}:{port}"
+
+    host = request.headers.get("host", "")
+    allowed = {_norm(o) for o in _cfg.TRUSTED_ORIGINS}
+    allowed.add(_norm(f"https://{host}"))
+    allowed.add(_norm(f"http://{host}"))
+    return _norm(origin) in allowed
+
+
+def _csrf_check(request: Request) -> bool:
+    """Origin check for production /admin state-changing requests authorized by
+    a browser session. API-token (non-browser) callers bypass it; going through
+    a browser without an Origin header is a rejected cross-site form."""
+    methods = ("POST", "PUT", "PATCH", "DELETE")
+    if _cfg.PRODUCTION and request.method in methods:
+        origin = request.headers.get("origin", "")
+        if not origin or not _same_origin(request, origin):
+            return False
+    return True
 
 # Fast-path hint queue: the API only pushes ids here (LPUSH). The row insert is
 # the durable source of truth; a redis push failure or a lost hint is recovered
@@ -41,31 +116,47 @@ async def service_authentication(request: Request, call_next):
         (revocable, rate-limited on mutating + integration routes, and every
         feedback action is attributed to the consumer that made it).
 
-    If API_AUTH_TOKEN is unset, the middleware stays open for local development
-    (documented behavior); production sets the token.
+    If API_AUTH_TOKEN is unset AND NEXUS_ENV is not production, the middleware
+    stays open for local development (documented behavior). With
+    NEXUS_ENV=production the API is fail-closed: a missing token never
+    short-circuits auth, and every request must present the shared token or
+    (on /admin) a valid panel session / consumer credential.
     """
-    public_paths = {"/health/live", "/health/ready", "/docs", "/openapi.json", "/redoc", "/admin/static", "/admin/health/ready"}
+    public_paths = {"/health/live", "/health/ready", "/docs", "/openapi.json", "/redoc", "/admin/health/ready"}
     admin_public_paths = {"/admin/login", "/admin/forgot", "/admin/reset", "/admin/register",
                           "/admin/login/google", "/admin/auth/google/callback"}
     path = request.url.path
-    if path in public_paths or path in admin_public_paths or path.startswith("/admin/invite/"):
+    if path in public_paths or path.startswith("/admin/static") or path in admin_public_paths or path.startswith("/admin/invite/"):
         return await call_next(request)
 
     shared_configured = bool(API_AUTH_TOKEN)
     supplied = request.headers.get("authorization", "")
     shared_ok = shared_configured and hmac.compare_digest(supplied, f"Bearer {API_AUTH_TOKEN}")
 
+    global _missing_token_warned
+    if _cfg.PRODUCTION and not shared_configured and not _missing_token_warned:
+        _missing_token_warned = True
+        log.warning(
+            "NEXUS_ENV=production but API_AUTH_TOKEN is not set - fail-closed: "
+            "all requests will be denied except public endpoints and valid panel sessions"
+        )
+
     if path.startswith("/admin"):
-        if shared_ok or not shared_configured:
+        if shared_ok:
             return await call_next(request)
         # Panel-first: a valid browser session unlocks the owner plane.
         from .admin_auth import verify_session
         if verify_session(request.cookies.get("nexus_admin_session")):
+            if not _csrf_check(request):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "cross-site request rejected"})
             return await call_next(request)
+        if not shared_configured and not _cfg.PRODUCTION:
+            return await call_next(request)  # dev-open
         return await _admin_denied(request)
 
     # Data plane: shared token (or dev-open) short-circuits.
-    if shared_ok or not shared_configured:
+    if shared_ok or (not shared_configured and not _cfg.PRODUCTION):
         return await call_next(request)
 
     consumer = None
@@ -86,6 +177,26 @@ async def service_authentication(request: Request, call_next):
                          "X-Nexus-RateLimit-Limit": str(consumer["rate_limit_per_minute"]),
                          "X-Nexus-RateLimit-Remaining": "0"})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Attach browser hardening headers to every response."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if _cfg.PRODUCTION:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    return response
+
+
+if _cfg.TRUSTED_HOSTS:
+    # Registered last so it is the outermost middleware: the Host header is
+    # validated before any auth/CSRF/security-header logic runs.
+    from fastapi.middleware.trustedhost import TrustedHostMiddleware
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_cfg.TRUSTED_HOSTS)
 
 
 async def _admin_denied(request: Request):
@@ -123,7 +234,11 @@ def _consumer_actor(request: Request, fallback: str = "user") -> str:
 
 def run():
     import uvicorn
-    uvicorn.run("post_clustering_pipeline.api:app", host="0.0.0.0", port=8000)
+
+    from .log import configure_json_logging
+
+    configure_json_logging()
+    uvicorn.run("post_clustering_pipeline.api:app", host="0.0.0.0", port=8000, log_config=None)
 
 
 # --- Request Models ---

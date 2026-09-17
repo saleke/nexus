@@ -170,12 +170,13 @@ async def panel_health_ready():
 # ---------------------------------------------------------------------------
 
 def _session_cookie(session_token: str) -> dict:
+    from . import config as cfg
     return {
         "key": "nexus_admin_session",
         "value": session_token,
         "httponly": True,
         "samesite": "lax",
-        "secure": False,
+        "secure": cfg.SESSION_COOKIE_SECURE,
         "path": "/admin",
         "max_age": 12 * 3600,
     }
@@ -211,20 +212,47 @@ async def panel_login(request: Request):
 
 @router.post("/login", include_in_schema=False)
 async def panel_login_submit(request: Request):
-    from .admin_auth import find_admin_by_email, verify_password, issue_session, touch_login, admin_count
+    from .admin_auth import (find_admin_by_email, verify_password, issue_session, touch_login,
+                             admin_count, valid_totp, _rate_limited_totp, _note_totp_failure)
+    from .ratelimit import blocked, note_failure, reset
     from fastapi.responses import RedirectResponse
+    from . import config as cfg
     form = await request.form()
     email = form.get("email", "").strip().lower()
     password = form.get("password", "")
+    client_ip = request.client.host if request.client else "unknown"
+    window = cfg.LOGIN_LOCK_WINDOW_SECONDS
+    if blocked("login", email, cfg.LOGIN_MAX_ATTEMPTS, window) or \
+            blocked("login-ip", client_ip, cfg.LOGIN_IP_MAX_ATTEMPTS, window):
+        return templates.TemplateResponse(request, "login.html",
+            _ctx(request, error="too many failed attempts - wait a few minutes",
+                 must_register=admin_count() == 0),
+            headers=TEMPLATE_METADATA)
     admin = find_admin_by_email(email)
     if not admin or not verify_password(password, admin["password_hash"]):
+        note_failure("login", email, window)
+        note_failure("login-ip", client_ip, window)
         return templates.TemplateResponse(request, "login.html",
             _ctx(request, error="invalid email or password", must_register=admin_count() == 0),
             headers=TEMPLATE_METADATA)
+    reset("login", email)
+    reset("login-ip", client_ip)
     if not admin["is_active"]:
         return templates.TemplateResponse(request, "login.html",
             _ctx(request, error="account disabled - contact an active admin", must_register=False),
             headers=TEMPLATE_METADATA)
+    if admin["totp_enabled"]:
+        code = (form.get("totp") or "").strip()
+        tkey = f"login-totp:{admin['id']}"
+        if _rate_limited_totp(tkey):
+            return templates.TemplateResponse(request, "login.html",
+                _ctx(request, error="too many attempts - wait a few minutes",
+                     must_register=False), headers=TEMPLATE_METADATA)
+        if not valid_totp(admin["totp_secret"], code):
+            _note_totp_failure(tkey)
+            return templates.TemplateResponse(request, "login.html",
+                _ctx(request, error="invalid Authenticator code - try again",
+                     must_register=False), headers=TEMPLATE_METADATA)
     token = issue_session(admin["email"], admin["id"])
     touch_login(admin["id"])
     resp = RedirectResponse(url="/admin/", status_code=303)
@@ -301,7 +329,7 @@ async def panel_login_google(request: Request):
             "&access_type=online",
         status_code=status.HTTP_303_SEE_OTHER)
     resp.set_cookie(key="nexus_google_oauth_state", value=state, httponly=True,
-                    samesite="lax", secure=False, path="/admin", max_age=600)
+                    samesite="lax", secure=cfg.SESSION_COOKIE_SECURE, path="/admin", max_age=600)
     return resp
 
 
@@ -338,6 +366,11 @@ async def panel_google_callback(request: Request):
     if info_resp.status_code != 200:
         return RedirectResponse(url="/admin/login?error=google-verify-failed", status_code=303)
     info = info_resp.json()
+    # Validate the identity token's audience and issuer: the token was minted
+    # for THIS client_id by Google's accounts.issuer, not for an attacker's app.
+    if info.get("aud") != cfg.GOOGLE_OAUTH_CLIENT_ID or info.get("iss") not in (
+            "accounts.google.com", "https://accounts.google.com"):
+        return RedirectResponse(url="/admin/login?error=google-invalid-state", status_code=303)
     email = (info.get("email") or "").strip().lower()
     verified = info.get("email_verified") in (True, "true")
     if not verified or not email:
@@ -444,19 +477,40 @@ async def panel_reset_submit(request: Request):
 
 @router.post("/settings/enroll-totp", include_in_schema=False)
 async def panel_enroll_totp(request: Request):
-    """Generate a new TOTP secret for the signed-in owner and show the otpauth URI."""
-    from .admin_auth import generate_totp_secret, set_totp, totp_uri
+    """Generate a new TOTP secret for the signed-in owner and show the QR + otpauth URI.
+
+    Re-authorizes the caller first: when TOTP is already enrolled, the CURRENT
+    Authenticator code must be supplied before a replacement can be issued, so
+    a hijacked session cannot lock the real owner out by swapping in an
+    attacker-controlled secret."""
+    from .admin_auth import (generate_totp_secret, set_totp, totp_uri,
+                             find_admin_by_email, reauthorize)
     from .audit import log_admin_action
+    import base64, io
+    import qrcode
     claim = _current_admin(request)
     if not claim:
         raise HTTPException(status_code=401, detail="not signed in")
+    form = await request.form()
+    admin = find_admin_by_email(claim["email"])
+    err = reauthorize(admin, form.get("current_password") or "",
+                      (form.get("totp") or "").strip())
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     secret = generate_totp_secret()
     set_totp(claim["admin_id"], secret, enabled=False)
     with get_db_cursor(commit=True) as cur:
         log_admin_action(cur, claim["email"], "auth.totp.enroll", "admin_users",
                          claim["admin_id"], {}, {})
+    uri = totp_uri(claim["email"], secret)
+    qr = qrcode.QRCode(border=2)
+    qr.add_data(uri)
+    qr.make(fit=True)
+    buf = io.BytesIO()
+    qr.make_image(fill_color="#e6edf3", back_color="#0d1117").save(buf, format="PNG")
+    qr_data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
     return templates.TemplateResponse(request, "security_totp_enroll.html",
-        _ctx(request, secret=secret, uri=totp_uri(claim["email"], secret)),
+        _ctx(request, secret=secret, uri=uri, qr_data_uri=qr_data_uri),
         headers=TEMPLATE_METADATA)
 
 
@@ -491,7 +545,7 @@ async def panel_confirm_totp(request: Request):
 
 @router.post("/settings/change-password", include_in_schema=False)
 async def panel_change_password(request: Request):
-    from .admin_auth import update_password
+    from .admin_auth import update_password, find_admin_by_email, reauthorize
     from .audit import log_admin_action
     claim = _current_admin(request)
     if not claim:
@@ -503,6 +557,11 @@ async def panel_change_password(request: Request):
         raise HTTPException(status_code=400, detail="password must be at least 10 characters")
     if password != confirm:
         raise HTTPException(status_code=400, detail="passwords do not match")
+    admin = find_admin_by_email(claim["email"])
+    err = reauthorize(admin, form.get("current_password") or "",
+                      (form.get("totp") or "").strip())
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     update_password(claim["admin_id"], password)
     with get_db_cursor(commit=True) as cur:
         log_admin_action(cur, claim["email"], "auth.password.change", "admin_users",
@@ -513,7 +572,7 @@ async def panel_change_password(request: Request):
 
 @router.post("/settings/change-username", include_in_schema=False)
 async def panel_change_username(request: Request):
-    from .admin_auth import update_email, find_admin_by_email
+    from .admin_auth import update_email, find_admin_by_email, reauthorize
     from .audit import log_admin_action
     claim = _current_admin(request)
     if not claim:
@@ -524,6 +583,11 @@ async def panel_change_username(request: Request):
         raise HTTPException(status_code=400, detail="a valid email is required")
     if find_admin_by_email(email):
         raise HTTPException(status_code=409, detail="that email is already in use")
+    admin = find_admin_by_email(claim["email"])
+    err = reauthorize(admin, form.get("current_password") or "",
+                      (form.get("totp") or "").strip())
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     old_email = claim["email"]
     update_email(claim["admin_id"], email)
     with get_db_cursor(commit=True) as cur:
@@ -537,8 +601,9 @@ async def panel_change_username(request: Request):
 @router.post("/settings/invite", include_in_schema=False)
 async def panel_invite_admin(request: Request):
     """Existing admin invites a new admin. No email is sent; the route returns a
-    copyable self-service link (guest picks their own password) and logs it so
-    the operator can deliver the link by any channel they prefer."""
+    copyable self-service link (guest picks their own password) that the
+    operator delivers over the channel they prefer. The invite is never written
+    to a log file - the link appears only in this HTTP response."""
     from .admin_auth import create_admin, issue_invite_token
     from .audit import log_admin_action
     import secrets
@@ -560,11 +625,6 @@ async def panel_invite_admin(request: Request):
     with get_db_cursor(commit=True) as cur:
         log_admin_action(cur, claim["email"], "admin.invite", "admin_users",
                          created["id"], {"email": email}, {})
-    try:
-        with open("/tmp/nexus-admin-invites.log", "a", encoding="utf-8") as fh:
-            fh.write(f"[{claim['email']}] invited {email} -> {link}\n")
-    except OSError:
-        pass
     return templates.TemplateResponse(request, "invite_result.html",
         _ctx(request, email=email, invite_link=link),
         headers=TEMPLATE_METADATA)

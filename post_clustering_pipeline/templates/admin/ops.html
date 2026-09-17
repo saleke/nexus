@@ -3,9 +3,34 @@
 <div class="page-head"><h1>Ops</h1></div>
 
 <div class="metric-row">
-  <div class="metric-card">
+  <div class="metric-card metric-broker">
     <span class="metric-label">Redis broker</span>
-    <span class="metric-value">{{ redis_state }}</span>
+    {% set broker_state = redis_state if redis_state in ['ok', 'down', 'unknown'] else 'unknown' %}
+    <span class="monitor monitor-state-{{ broker_state }}" title="Redis broker: {{ broker_state }}">
+      <span class="monitor-trace-wrap">
+        <svg class="monitor-svg" viewBox="0 0 240 40" aria-hidden="true">
+          <g class="monitor-trace">
+            <g class="monitor-beat">
+              <path class="monitor-wave monitor-halo" d="M0 30 L8 30 L12 25 L17 30 L24 30 L26 32 L28 2 L30 34 L33 30 L40 30 L45 24 L51 30 L80 30"/>
+              <path class="monitor-wave monitor-core" d="M0 30 L8 30 L12 25 L17 30 L24 30 L26 32 L28 2 L30 34 L33 30 L40 30 L45 24 L51 30 L80 30"/>
+            </g>
+            <g class="monitor-beat">
+              <path class="monitor-wave monitor-halo" d="M80 30 L88 30 L92 25 L97 30 L104 30 L106 32 L108 2 L110 34 L113 30 L120 30 L125 24 L131 30 L160 30"/>
+              <path class="monitor-wave monitor-core" d="M80 30 L88 30 L92 25 L97 30 L104 30 L106 32 L108 2 L110 34 L113 30 L120 30 L125 24 L131 30 L160 30"/>
+            </g>
+            <g class="monitor-beat">
+              <path class="monitor-wave monitor-halo" d="M160 30 L168 30 L172 25 L177 30 L184 30 L186 32 L188 2 L190 34 L193 30 L200 30 L205 24 L211 30 L240 30"/>
+              <path class="monitor-wave monitor-core" d="M160 30 L168 30 L172 25 L177 30 L184 30 L186 32 L188 2 L190 34 L193 30 L200 30 L205 24 L211 30 L240 30"/>
+            </g>
+          </g>
+          <g class="monitor-flatline">
+            <path class="monitor-wave monitor-flat-halo" d="M0 30 H240"/>
+            <path class="monitor-wave monitor-flat-core" d="M0 30 H240"/>
+          </g>
+        </svg>
+      </span>
+      <span class="monitor-tag">{{ broker_state }}</span>
+    </span>
   </div>
   <div class="metric-card">
     <span class="metric-label">Celery queue</span>

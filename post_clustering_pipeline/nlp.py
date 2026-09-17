@@ -177,34 +177,41 @@ SIGNAL_NOUNS = {
 SIGNAL_LEXICON = SIGNAL_VERBS | SIGNAL_NOUNS
 
 
-def _discourse_analysis(text: str) -> tuple[bool, str, list[str]]:
-    """Single spaCy pass that both gates the post and extracts strong entities
-    (PERSON/ORG/PRODUCT/NORP) as ``LABEL:text`` strings. Reused by the gate and
-    by ingestion so one parser run serves both purposes."""
+def _gate_prechecks(text: str) -> tuple[str, str, str | None]:
+    """Pre-parse gate checks that need no spaCy Doc: returns ``(cleaned,
+    lowered, fail_reason)`` where ``fail_reason`` is None when parsing is
+    required. Mirrors the original ``_discourse_analysis`` early-exit order
+    (empty_text -> too_short -> chatter_marker -> personal_diary) exactly, so
+    batch and single-doc paths produce identical verdicts."""
     if not text or len(text.strip()) == 0:
-        return False, "empty_text", []
+        return "", "", "empty_text"
 
     cleaned = text.strip()
     cleaned = _strip_emoji(cleaned)
     words = cleaned.split()
     if len(words) < 7:
-        return False, "too_short", []
+        return cleaned, "", "too_short"
 
     lower = cleaned.lower()
 
     # 1. Instant rejection of casual personal chatter markers
     for pattern in CHATTER_PATTERNS:
         if re.search(pattern, lower):
-            return False, "chatter_marker", []
+            return cleaned, lower, "chatter_marker"
 
     # 2. First-person dominance check (personal diary/status filter)
     first_person_tokens = re.findall(r"\b(i|me|my|myself|im)\b", lower)
     first_person_ratio = len(first_person_tokens) / max(len(words), 1)
     if len(first_person_tokens) >= 3 and first_person_ratio > 0.22:
-        return False, "personal_diary", []
+        return cleaned, lower, "personal_diary"
 
-    doc = nlp(cleaned)
+    return cleaned, lower, None
 
+
+def _gate_classify(cleaned: str, lower: str, doc) -> tuple[bool, str, list[str]]:
+    """Admission decision for an already-parsed Doc. Never called unless
+    ``_gate_prechecks`` returned a parseable text, so ``lower`` is the lowered
+    non-empty cleaned text (deterministically ``cleaned.lower()``)."""
     strong_entities: list[str] = []
     seen: set[str] = set()
     for ent in doc.ents:
@@ -247,6 +254,39 @@ def _discourse_analysis(text: str) -> tuple[bool, str, list[str]]:
         return True, "valid_discourse", strong_entities
 
     return False, "lacks_substance", []
+
+
+def _discourse_analysis(text: str) -> tuple[bool, str, list[str]]:
+    """Single spaCy pass that both gates the post and extracts strong entities
+    (PERSON/ORG/PRODUCT/NORP) as ``LABEL:text`` strings. Reused by the gate and
+    by ingestion so one parser run serves both purposes."""
+    cleaned, lower, fail = _gate_prechecks(text)
+    if fail:
+        return False, fail, []
+    doc = nlp(cleaned)
+    return _gate_classify(cleaned, lower, doc)
+
+
+def analyze_discourse_batch(texts, batch_size: int = 32) -> list[tuple[bool, str, list[str]]]:
+    """Identical verdicts to ``[analyze_discourse(t) for t in texts]`` but the
+    spaCy parses run through ``nlp.pipe`` for its internal batching. spaCy
+    applies the same pipeline to each document regardless of batching, so every
+    (passes, reason, entities) result is deterministic and byte-identical to
+    the single-doc path - this is a throughput change only, never a behaviour
+    change to the discourse gate."""
+    results: list[tuple[bool, str, list[str]]] = [None] * len(texts)  # type: ignore[list-item]
+    parse_entries: list[tuple[int, str, str]] = []  # (original index, cleaned, lowered)
+    for i, text in enumerate(texts):
+        cleaned, lower, fail = _gate_prechecks(text)
+        if fail:
+            results[i] = (False, fail, [])
+        else:
+            parse_entries.append((i, cleaned, lower))
+    if parse_entries:
+        parsed = nlp.pipe([cleaned for _, cleaned, _ in parse_entries], batch_size=batch_size, as_tuples=False)
+        for doc, (orig_idx, cleaned, lower) in zip(parsed, parse_entries):
+            results[orig_idx] = _gate_classify(cleaned, lower, doc)
+    return results
 
 
 def is_worth_seeing(text: str) -> tuple[bool, str]:

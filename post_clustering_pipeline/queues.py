@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import setup_logging
 import redis
 
 from .config import REDIS_URL, INGEST_HINTS_KEY, INGEST_HINTS_CAP
@@ -19,6 +20,21 @@ celery_app.conf.update(
     enable_utc=True,
     imports=["post_clustering_pipeline.tasks"]
 )
+
+
+@setup_logging.connect
+def _structured_json_logging(**kwargs):
+    """Log JSON-only from the worker/beat.
+
+    Celery skips its own logging config whenever a receiver is connected to the
+    ``setup_logging`` signal, so this one call is our sole handler: without it
+    celery's Logging.setup hijacks the root logger and reinstalls its text
+    ColorFormatter. The NullHandler that kombu drops on the 'celery' logger is
+    removed by configure_json_logging before celery.boot logs anything.
+    """
+    from .log import configure_json_logging
+
+    configure_json_logging()
 
 # Automated Beat Schedule
 celery_app.conf.beat_schedule = {
@@ -131,3 +147,21 @@ def distributed_task_lock(lock_name: str, timeout: int = 3600):
                 lock.release()
             except Exception:
                 pass
+
+
+def worker_main() -> None:
+    """Console entry point with structured logging (see log.py)."""
+    from .log import configure_json_logging
+    from celery.bin.celery import celery
+
+    configure_json_logging()
+    celery.main()
+
+
+def beat_main() -> None:
+    """Console entry point with structured logging (see log.py)."""
+    from .log import configure_json_logging
+    from celery.bin.celery import celery
+
+    configure_json_logging()
+    celery.main()

@@ -1,12 +1,12 @@
 from .queues import celery_app, distributed_task_lock, get_redis_client
 from .db import get_db_cursor, extract_val
-from .nlp import cleanse_text, analyze_discourse
+from .nlp import cleanse_text, analyze_discourse_batch
 from .models import get_embedding_engine
-from .events import write_outbox
+from .events import write_outbox_bulk
 from .embed_io import vector_to_array_literal, parse_vector_literal
 from .chunks import iter_chunks
 from .assignment import assign_valid_for_encoding, resolve_stale_candidates
-from .decisions import log_decision
+from .decisions import log_decisions_bulk
 from .centroid import bounded_rolling_centroid, anchor_blended_centroid, normalize
 from .policy import current_versions
 from .config import (
@@ -64,43 +64,61 @@ def process_post_batch_ingestion(posts: list[dict]):
     for claim_chunk, _, _ in iter_chunks(posts, CLAIM_CHUNK_SIZE):
         with get_db_cursor(commit=True, durable=CLAIM_DURABLE) as cur:
             pv, mv = current_versions(cur)
-            for p in claim_chunk:
-                pid = p["id"]
-                content = p["content"]
 
+            # Single-statement CAS claim for the whole chunk: one round-trip
+            # instead of one per post. Rows already claimed/finalized by a
+            # concurrent attempt are simply not returned, preserving the same
+            # "skip" semantics as the old per-post CAS.
+            cur.execute(
+                """
+                UPDATE posts
+                SET assignment_status = 'processing', assignment_updated_at = NOW()
+                WHERE id = ANY(%s::int[])
+                  AND assignment_status = 'pending'
+                RETURNING id;
+                """,
+                ([p["id"] for p in claim_chunk],)
+            )
+            claimed_ids = {int(extract_val(r, "id", 0)) for r in (cur.fetchall() or [])}
+            claimed = [p for p in claim_chunk if p["id"] in claimed_ids]
+            if not claimed:
+                continue
+
+            # Bulk discourse gate: verdicts are byte-identical to per-post
+            # analyze_discourse calls (nlp.pipe is a pure throughput change),
+            # so admission/noise outcomes are unchanged.
+            verdicts = analyze_discourse_batch([p["content"] for p in claimed])
+            noise_rows = []
+            batch_entities = []
+            for item, (worth_seeing, reason, entities) in zip(claimed, verdicts):
+                pid = item["id"]
+                if not worth_seeing:
+                    noise_rows.append((pid, reason))
+                    skipped_count += 1
+                    continue
+                valid_for_encoding.append({"id": pid, "content": item["content"], "cleaned": cleanse_text(item["content"])})
+                if entities:
+                    batch_entities.append((pid, entities))
+
+            if noise_rows:
                 cur.execute(
                     """
                     UPDATE posts
-                    SET assignment_status = 'processing', assignment_updated_at = NOW()
-                    WHERE id = %s AND assignment_status = 'pending'
-                    RETURNING id;
+                    SET assignment_status = 'noise', assignment_updated_at = NOW()
+                    WHERE id = ANY(%s::int[]);
                     """,
-                    (pid,)
+                    ([pid for pid, _ in noise_rows],)
                 )
-                if not cur.fetchone():
-                    continue  # Already claimed/finalized by another attempt
+                write_outbox_bulk(cur, [
+                    ("post.noise", pid, None, {"post_id": pid, "status": "noise", "reason": reason})
+                    for pid, reason in noise_rows
+                ])
+                log_decisions_bulk(cur, [
+                    (pid, None, None, None, None, None, "noise", None, pv, mv, "discourse_gate_noise")
+                    for pid, _ in noise_rows
+                ])
 
-                worth_seeing, reason, entities = analyze_discourse(content)
-                if not worth_seeing:
-                    cur.execute(
-                        "UPDATE posts SET assignment_status = 'noise', assignment_updated_at = NOW() WHERE id = %s;",
-                        (pid,)
-                    )
-                    write_outbox(cur, "post.noise", pid, None, {
-                        "post_id": pid,
-                        "status": "noise",
-                        "reason": reason
-                    })
-                    log_decision(cur, post_id=pid, event_id=None, similarity=None,
-                                 runner_similarity=None, threshold_used=None,
-                                 margin_budget=None, status="noise", confidence=None,
-                                 policy_version=pv, model_version=mv, reason="discourse_gate_noise")
-                    skipped_count += 1
-                    continue
-
-                valid_for_encoding.append({"id": pid, "content": content, "cleaned": cleanse_text(content)})
-                if entities:
-                    entity_rows.append((pid, entities))
+            entity_rows.extend(batch_entities)
 
     # Persist extracted strong entities (LABEL:text[]) for entity-conflict
     # disambiguation in assignment/birth. Separate update: failure here only

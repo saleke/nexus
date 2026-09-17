@@ -1,6 +1,5 @@
 <section class="network-wrap" id="nexus-network-container" aria-label="Hub network visualization">
     <canvas id="nexus-network"></canvas>
-    <div class="net-status"><span class="dot" aria-hidden="true"></span>hub network · static</div>
     <div class="net-legend">
         <span><i class="l-dot l-core"></i>core hub</span>
         <span><i class="l-dot l-member"></i>member</span>
@@ -31,7 +30,7 @@
         background: rgba(88, 166, 255, .5);
     }
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous"></script>
 <script>
 (function () {
     "use strict";
@@ -129,22 +128,51 @@
         }
     }
 
-    // Static render: nodes and links fixed at their composed positions.
+    // Slow, gentle animation: the network slowly revolves and sways so the hub
+    // graph reads as alive rather than frozen — "moving, slowly, not too slow".
+    // Falls back to a single static frame when the user prefers reduced motion.
+    const tempVec = new THREE.Vector3();
+    let rafId = null;
+    let reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function updateLines() {
+        const posAttr = networkLines.geometry.attributes.position.array;
+        let index = 0;
+        scene.updateMatrixWorld();
+        for (let i = 0; i < linePairs.length; i++) {
+            const a = linePairs[i].a;
+            const b = linePairs[i].b;
+            nodes[a].mesh.getWorldPosition(tempVec);
+            posAttr[index++] = tempVec.x; posAttr[index++] = tempVec.y; posAttr[index++] = tempVec.z;
+            nodes[b].mesh.getWorldPosition(tempVec);
+            posAttr[index++] = tempVec.x; posAttr[index++] = tempVec.y; posAttr[index++] = tempVec.z;
+        }
+        networkLines.geometry.attributes.position.needsUpdate = true;
+    }
+
     function renderStatic() {
         for (let i = 1; i < nodes.length; i++) {
             nodes[i].mesh.position.copy(nodes[i].targetPos);
         }
-        const posAttr = networkLines.geometry.attributes.position.array;
-        let index = 0;
-        for (let i = 0; i < linePairs.length; i++) {
-            const pA = nodes[linePairs[i].a].mesh.position;
-            const pB = nodes[linePairs[i].b].mesh.position;
-            posAttr[index++] = pA.x; posAttr[index++] = pA.y; posAttr[index++] = pA.z;
-            posAttr[index++] = pB.x; posAttr[index++] = pB.y; posAttr[index++] = pB.z;
-        }
-        networkLines.geometry.attributes.position.needsUpdate = true;
+        nodeGroup.rotation.set(0, 0, 0);
         camera.lookAt(0, 0, 0);
+        updateLines();
         renderer.render(scene, camera);
+    }
+
+    function frame() {
+        rafId = null;
+        // Circular (in-plane) revolution: every node travels a slow circle
+        // around the core, like a carousel — deliberately not a vertical
+        // flip. The constellation keeps its depth, so the screen motion stays
+        // orbital rather than end-over-end.
+        nodeGroup.rotation.z += 0.0025;
+        camera.lookAt(0, 0, 0);
+        updateLines();
+        renderer.render(scene, camera);
+        if (!reduced) {
+            rafId = requestAnimationFrame(frame);
+        }
     }
 
     function resize() {
@@ -153,7 +181,11 @@
         camera.aspect = boxW / boxH;
         camera.updateProjectionMatrix();
         renderer.setSize(boxW, boxH);
-        renderStatic();
+        if (reduced) {
+            renderStatic();
+        } else if (rafId === null) {
+            rafId = requestAnimationFrame(frame);
+        }
     }
 
     if (window.ResizeObserver) {

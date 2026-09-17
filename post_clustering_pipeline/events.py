@@ -64,3 +64,43 @@ def write_outbox(cur, event_type: str, post_id: int | None = None, event_id: int
         """,
         (event_type, post_id, event_id, json.dumps(payload, default=str))
     )
+
+
+def write_outbox_bulk(cur, events) -> None:
+    """Write many outbox events in one seq-bump + one INSERT.
+
+    ``events``: iterable of ``(event_type, post_id, event_id, payload)`` tuples,
+    mirroring ``write_outbox`` row-for-row (same seq attachment, same conflict
+    upsert). One round-trip for the seq bump and one for the insert regardless
+    of batch size, so noise flaps and bulk assignments no longer pay N UPDATEs.
+    """
+    rows = [(e[0], e[1], e[2], e[3]) for e in events if e]
+    if not rows:
+        return
+    seqs = bump_post_seqs(cur, [post_id for _, post_id, _, _ in rows])
+    from psycopg2.extras import execute_values
+    execute_values(
+        cur,
+        """
+        INSERT INTO integration_outbox (event_type, post_id, event_id, payload, schema_version)
+        VALUES %s
+        ON CONFLICT (post_id, event_type) WHERE post_id IS NOT NULL
+        DO UPDATE SET
+            event_id = EXCLUDED.event_id,
+            payload = EXCLUDED.payload,
+            schema_version = 2,
+            delivery_status = 'pending',
+            attempts = 0,
+            available_at = NOW();
+        """,
+        [
+            (
+                event_type,
+                post_id,
+                event_id,
+                json.dumps(_seq_payload(dict(payload or {}), seqs.get(post_id)), default=str),
+            )
+            for event_type, post_id, event_id, payload in rows
+        ],
+        template="(%s, %s::int, %s::int, %s::jsonb, 2)",
+    )

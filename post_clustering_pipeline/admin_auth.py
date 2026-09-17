@@ -145,16 +145,49 @@ def issue_session(email: str, admin_id: int) -> str:
 
 
 def verify_session(token: str) -> dict | None:
+    """Verify a session JWT AND that the account still exists and is active.
+
+    Re-checking against admin_users on every request means a session that was
+    not signed out explicitly still dies the moment the account is disabled or
+    deleted - it cannot outlive its revocation window."""
     if not token:
         return None
     try:
         payload = jwt.decode(token, _session_secret(), algorithms=["HS256"])
     except jwt.PyJWTError:
         return None
+    try:
+        admin = find_admin_by_id(int(payload.get("sub", 0)))
+    except Exception:
+        return None
+    if not admin or not admin["is_active"]:
+        return None
     return {
-        "admin_id": int(payload.get("sub", 0)),
-        "email": payload.get("email", ""),
+        "admin_id": admin["id"],
+        "email": admin["email"],
     }
+
+
+def reauthorize(admin: dict | None, password: str, totp_code: str = "") -> str | None:
+    """Re-verify current credentials before a privileged change.
+
+    Used for changing a password/username or re-enrolling TOTP: the caller must
+    re-prove possession of the account (and the enrolled Authenticator, when
+    TOTP is on). Returns None when the re-auth succeeds, or a human-readable
+    error message otherwise. TOTP failures share the in-process rate-limit
+    bucket used by the other TOTP checks."""
+    if not admin:
+        return "account not found"
+    if not verify_password(password or "", admin["password_hash"]):
+        return "current password is incorrect"
+    if admin["totp_enabled"]:
+        key = f"reauth:{admin['id']}"
+        if _rate_limited_totp(key):
+            return "too many attempts - wait a few minutes"
+        if not valid_totp(admin["totp_secret"], totp_code):
+            _note_totp_failure(key)
+            return "invalid Authenticator code"
+    return None
 
 
 # ---------------------------------------------------------------------------

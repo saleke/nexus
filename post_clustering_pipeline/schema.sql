@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE event_hubs (
+CREATE TABLE IF NOT EXISTS event_hubs (
     id SERIAL PRIMARY KEY,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -16,7 +16,7 @@ CREATE TABLE event_hubs (
     centroid vector(384)
 );
 
-CREATE TABLE posts (
+CREATE TABLE IF NOT EXISTS posts (
     id SERIAL PRIMARY KEY,
     user_id INT NOT NULL,
     content TEXT NOT NULL,
@@ -40,13 +40,13 @@ CREATE TABLE posts (
     entities text[]
 );
 
-CREATE TABLE unclustered_posts_buffer (
+CREATE TABLE IF NOT EXISTS unclustered_posts_buffer (
     post_id INT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
     embedding vector(384) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE TABLE clustering_feedback_log (
+CREATE TABLE IF NOT EXISTS clustering_feedback_log (
     id SERIAL PRIMARY KEY,
     post_id INT REFERENCES posts(id) ON DELETE CASCADE,
     event_id INT REFERENCES event_hubs(id) ON DELETE CASCADE,
@@ -58,7 +58,7 @@ CREATE TABLE clustering_feedback_log (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE TABLE system_config (
+CREATE TABLE IF NOT EXISTS system_config (
     key VARCHAR(50) PRIMARY KEY,
     value NUMERIC(4,3) NOT NULL,
     value_text TEXT
@@ -70,18 +70,19 @@ ON CONFLICT (key) DO NOTHING;
 -- Idempotent backfill for databases created before value_text existed.
 ALTER TABLE system_config ADD COLUMN IF NOT EXISTS value_text TEXT;
 
-CREATE INDEX ON posts USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX idx_event_hubs_last_updated ON event_hubs(last_updated_at DESC);
-CREATE INDEX idx_posts_event_timeline ON posts(event_id, created_at ASC);
-CREATE INDEX idx_posts_active_event_timeline
+-- Named to match the canonical deployed schema so re-applying is a no-op.
+CREATE INDEX IF NOT EXISTS posts_embedding_idx ON posts USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_event_hubs_last_updated ON event_hubs(last_updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_event_timeline ON posts(event_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_posts_active_event_timeline
 ON posts(event_id, created_at ASC, id ASC)
 WHERE deleted_at IS NULL;
-CREATE INDEX idx_posts_event_engagement ON posts(event_id, engagement_score DESC);
-CREATE INDEX idx_posts_assignment_status ON posts(assignment_status, assignment_updated_at DESC);
-CREATE UNIQUE INDEX uq_posts_source_external_id ON posts(source_id, external_post_id) WHERE external_post_id IS NOT NULL;
-CREATE INDEX idx_feedback_analysis ON clustering_feedback_log(feedback_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_event_engagement ON posts(event_id, engagement_score DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_assignment_status ON posts(assignment_status, assignment_updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_source_external_id ON posts(source_id, external_post_id) WHERE external_post_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_feedback_analysis ON clustering_feedback_log(feedback_type, created_at DESC);
 
-CREATE TABLE model_registry (
+CREATE TABLE IF NOT EXISTS model_registry (
     id SERIAL PRIMARY KEY,
     model_version VARCHAR(100) NOT NULL UNIQUE,
     adapter_path TEXT NOT NULL,
@@ -93,7 +94,7 @@ CREATE TABLE model_registry (
     promoted_at TIMESTAMP WITH TIME ZONE
 );
 
-CREATE TABLE integration_outbox (
+CREATE TABLE IF NOT EXISTS integration_outbox (
     id BIGSERIAL PRIMARY KEY,
     event_type VARCHAR(50) NOT NULL,
     post_id INT REFERENCES posts(id) ON DELETE CASCADE,
@@ -110,8 +111,8 @@ CREATE TABLE integration_outbox (
     last_error TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
-CREATE INDEX idx_outbox_pending ON integration_outbox(delivery_status, available_at, id);
-CREATE INDEX idx_outbox_lease ON integration_outbox(lease_until, id);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON integration_outbox(delivery_status, available_at, id);
+CREATE INDEX IF NOT EXISTS idx_outbox_lease ON integration_outbox(lease_until, id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_outbox_post_event_type ON integration_outbox(post_id, event_type) WHERE post_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_posts_processing_sweeper ON posts(assignment_status, assignment_updated_at) WHERE assignment_status = 'processing';
 CREATE INDEX IF NOT EXISTS idx_event_hubs_redirect ON event_hubs(id, merged_into_id) WHERE is_active = FALSE;

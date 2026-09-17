@@ -8,3 +8,6 @@ __pycache__/
 .mypy_cache/
 dist/
 build/
+celerybeat-schedule*
+logs/
+*.pid

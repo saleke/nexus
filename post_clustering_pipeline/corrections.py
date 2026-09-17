@@ -123,7 +123,11 @@ def unlink_post(cur, post_id: int, event_id: int, actor: str = "user",
 def confirm_post(cur, post_id: int, event_id: int, actor: str = "user",
                  detailed: bool = True) -> dict:
     """Pin a post into a hub as a human-confirmed assignment."""
-    cur.execute("SELECT event_id, assignment_confidence, assignment_status FROM posts WHERE id = %s AND deleted_at IS NULL", (post_id,))
+    # Lock the row before reading so the hub bookkeeping below reflects the
+    # post's real prior hub even under a concurrent confirm/assign/delete:
+    # with FOR UPDATE the second writer blocks until the first commits, then
+    # reads the committed event_id (no CAS drift -> no double decrement).
+    cur.execute("SELECT event_id, assignment_confidence, assignment_status FROM posts WHERE id = %s AND deleted_at IS NULL FOR UPDATE", (post_id,))
     row = cur.fetchone()
     if not row:
         raise CorrectionError("post not found")

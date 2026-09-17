@@ -1,63 +1,90 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: clustering_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d clustering_db"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    restart: unless-stopped
+    command: ["redis-server"]
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
 
   migrate:
     build: .
-    command: sh -c "until pg_isready -h postgres -U postgres -d clustering_db; do sleep 2; done; PGPASSWORD=postgres psql -h postgres -U postgres -d clustering_db -f post_clustering_pipeline/schema.sql"
+    restart: "no"
+    command: >
+      sh -c "until pg_isready -h postgres -U postgres -d clustering_db; do sleep 2; done;
+             python -m post_clustering_pipeline.migrate"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/clustering_db
     depends_on:
       postgres: {condition: service_healthy}
 
   api:
     build: .
+    restart: unless-stopped
     command: python -m post_clustering_pipeline
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/clustering_db
       REDIS_URL: redis://redis:6379/0
     ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 15s
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
 
   worker:
     build: .
-    command: celery -A post_clustering_pipeline.queues.celery_app worker --loglevel=INFO --pool=threads --concurrency=4
+    restart: unless-stopped
+    command: nexus-celery-worker -A post_clustering_pipeline.queues.celery_app worker --loglevel=INFO --pool=threads --concurrency=4
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/clustering_db
       REDIS_URL: redis://redis:6379/0
+    stop_grace_period: 60s
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
 
   beat:
     build: .
-    command: celery -A post_clustering_pipeline.queues.celery_app beat --loglevel=INFO
+    restart: unless-stopped
+    command: nexus-celery-beat -A post_clustering_pipeline.queues.celery_app beat --loglevel=INFO --schedule /var/lib/nexus/celerybeat-schedule
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/clustering_db
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/clustering_db
       REDIS_URL: redis://redis:6379/0
+    volumes: ["beat_data:/var/lib/nexus"]
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
 
 volumes:
   postgres_data:
+  beat_data:

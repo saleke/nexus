@@ -14,6 +14,42 @@ GOOGLE_OAUTH_REDIRECT_BASE = os.getenv("GOOGLE_OAUTH_REDIRECT_BASE", "").rstrip(
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/clustering_db")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
+# Deployment posture. ``NEXUS_ENV=production`` switches the API to fail-closed:
+# requests without the shared token (and, on /admin, without a valid panel
+# session) are rejected instead of skipping auth (the dev-open default). The
+# production posture is opt-in so local development keeps working with no token.
+NEXUS_ENV = os.getenv("NEXUS_ENV", "development").strip().lower()
+PRODUCTION = NEXUS_ENV in {"production", "prod"}
+
+# Admin session cookie Secure flag. Defaults to True in production so the cookie
+# is only ever sent over HTTPS; dev behind trusted http://localhost can set it
+# explicit false. A TLS-terminating proxy needs uvicorn `--proxy-headers` +
+# FORWARDED_ALLOW_IPS for the real client IP, and the app served over https.
+SESSION_COOKIE_SECURE = os.getenv(
+    "SESSION_COOKIE_SECURE", "true" if PRODUCTION else "false"
+).lower() in {"1", "true", "yes", "on"}
+
+# /admin/login throttle: failed attempts are counted per account and per client
+# IP over a sliding window; either bucket full blocks further attempts for the
+# rest of the window. Counts live in Redis (shared across workers/instances)
+# with a per-process best-effort fallback if Redis is unreachable.
+LOGIN_MAX_ATTEMPTS = int(os.getenv("LOGIN_MAX_ATTEMPTS", "10"))
+LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("LOGIN_IP_MAX_ATTEMPTS", "30"))
+LOGIN_LOCK_WINDOW_SECONDS = int(os.getenv("LOGIN_LOCK_WINDOW_SECONDS", "900"))
+
+# Host header allow-list enforced by Starlette TrustedHostMiddleware (comma-
+# separated). When empty the header is not validated; operators behind a
+# reverse proxy should list the public hostname(s) clients actually use so a
+# crafted Host header cannot poison redirects/CORS decision logic.
+TRUSTED_HOSTS = [h.strip().lower() for h in os.getenv("TRUSTED_HOSTS", "").split(",") if h.strip()]
+
+# Extra browser origins accepted for /admin state-changing requests (CSRF
+# Origin check, enforced only in production). The same host as the request is
+# always allowed; add TRUSTED_ORIGINS when the panel is reachable through
+# multiple public origins (e.g. https://panel.example.com plus a load-balancer
+# front) or when the Origin seen by the app differs from the Host it sees.
+TRUSTED_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("TRUSTED_ORIGINS", "").split(",") if o.strip()]
+
 # Base model and adapter paths
 BASE_MODEL_NAME = os.getenv("BASE_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))

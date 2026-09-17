@@ -1,9 +1,12 @@
 <h3 class="frag-title">Recovery (Google Authenticator)</h3>
 <p class="muted small">
-  Scan or enter this secret into your Authenticator app, then confirm with the
-  6-digit code below. Once confirmed, a forgotten password can be recovered.
+  Scan the QR code with your Authenticator app, or enter the secret by hand below.
+  Once confirmed, a forgotten password can be recovered.
 </p>
 <div class="totp-box">
+  {% if qr_data_uri %}
+  <img class="totp-qr" src="{{ qr_data_uri }}" alt="Google Authenticator setup QR" width="168" height="168">
+  {% endif %}
   <code class="totp-secret">{{ secret }}</code>
   <span class="muted tiny">base32 secret</span>
   <p class="small"><b>otpauth URI</b><br><code class="wrap">{{ uri }}</code></p>

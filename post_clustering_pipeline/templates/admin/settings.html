@@ -24,32 +24,46 @@
   <div class="settings-row">
     <div>
       <div class="strong">Account recovery</div>
-      <div class="muted small">Google Authenticator TOTP used to unlock this account.</div>
+      <div class="muted small">Google Authenticator TOTP used to unlock this account. Required at login and before security changes once enrolled.</div>
     </div>
     <div>
       {% if current_admin.totp_enabled %}
       <span class="badge ok">enabled</span>
       <button class="btn ghost small" hx-post="/admin/settings/enroll-totp"
+              hx-include="#reauth-current-password,#reauth-totp"
               hx-target="#totp-enroll-out" hx-swap="innerHTML">re-enroll</button>
       {% else %}
       <span class="badge warn">disabled</span>
       <button class="btn small" hx-post="/admin/settings/enroll-totp"
+              hx-include="#reauth-current-password,#reauth-totp"
               hx-target="#totp-enroll-out" hx-swap="innerHTML">enroll now</button>
       {% endif %}
     </div>
   </div>
+
+  <details class="security-reauth">
+    <summary class="muted tiny">Security changes require re-confirming your current password
+      {% if current_admin.totp_enabled %}and an Authenticator code{% endif %}</summary>
+    <div class="reauth-fields">
+      <input type="password" id="reauth-current-password" name="current_password"
+             placeholder="current password" autocomplete="current-password">
+      <input type="text" id="reauth-totp" name="totp" inputmode="numeric" pattern="[0-9]*"
+             maxlength="6" placeholder="authenticator code (only if enrolled)"
+             autocomplete="one-time-code">
+    </div>
+  </details>
   <div id="totp-enroll-out"></div>
 
   <h4 class="frag-title">Change username</h4>
   <form class="inline-form" hx-post="/admin/settings/change-username" hx-target="#security-out"
-        hx-swap="innerHTML">
+        hx-swap="innerHTML" hx-include="#reauth-current-password,#reauth-totp">
     <input type="email" name="email" placeholder="new username (email)" required>
     <button class="btn small" type="submit">Update</button>
   </form>
 
   <h4 class="frag-title">Change password</h4>
   <form class="inline-form" hx-post="/admin/settings/change-password" hx-target="#security-out"
-        hx-swap="innerHTML">
+        hx-swap="innerHTML" hx-include="#reauth-current-password,#reauth-totp">
     <input type="password" name="password" placeholder="new password (min 10)" minlength="10" required>
     <input type="password" name="confirm" placeholder="repeat new password" minlength="10" required>
     <button class="btn small" type="submit">Update</button>

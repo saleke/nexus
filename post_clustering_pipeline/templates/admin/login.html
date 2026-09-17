@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Nexus Control · login</title>
   <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
-  <link rel="stylesheet" href="/admin/static/panel.css?v=29">
+  <link rel="stylesheet" href="/admin/static/panel.css?v=31">
 </head>
 <body class="auth-body">
 <main class="auth-shell">
@@ -51,6 +51,10 @@
     <form class="auth-form" method="post" action="/admin/login" autocomplete="off">
       <label>Email <input type="email" name="email" required autofocus></label>
       <label>Password <input type="password" name="password" required></label>
+      <label>Authenticator code
+        <input type="text" name="totp" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+               autocomplete="one-time-code" placeholder="6 digits - required when enrolled">
+      </label>
       <button class="btn" type="submit">Log in</button>
     </form>
     <p class="muted small center">{% if google_enabled %}Forgot your password? Recover it through
