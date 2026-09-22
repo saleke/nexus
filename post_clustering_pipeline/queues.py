@@ -18,7 +18,17 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
-    imports=["post_clustering_pipeline.tasks"]
+    imports=["post_clustering_pipeline.tasks"],
+    # Reliability for a DB/ML workload on a thread-pool worker: never
+    # prefetch more than one message per thread (a 4x prefetch lets one
+    # saturated worker sit on tasks another worker could run), and only ack a
+    # task after it returns so a killed worker re-delivers instead of silently
+    # dropping it. All tasks are idempotent (claim/lease/distributed-lock
+    # guarded), so re-delivery is safe.
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    broker_connection_retry_on_startup=True,
 )
 
 
@@ -58,6 +68,10 @@ celery_app.conf.beat_schedule = {
     "hub-merge-reconciliation-every-30m": {
         "task": "post_clustering_pipeline.tasks.run_hub_merge_scheduled",
         "schedule": crontab(minute="5,35"),
+    },
+    "repost-fold-sweep-every-10m": {
+        "task": "post_clustering_pipeline.tasks.fold_hub_reposts_scheduled",
+        "schedule": 600.0,
     },
     "prune-delivered-outbox-daily": {
         "task": "post_clustering_pipeline.tasks.prune_delivered_outbox",

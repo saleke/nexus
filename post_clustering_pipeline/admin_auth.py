@@ -123,15 +123,73 @@ def _session_secret() -> str:
     with get_db_cursor(commit=True) as cur:
         cur.execute("SELECT value_text FROM system_config WHERE key = 'admin_session_secret'")
         row = cur.fetchone()
-        if row and extract_val(row, "value_text", 0):
-            return extract_val(row, "value_text", 0)
+        stored = extract_val(row, "value_text", 0)
+        if stored:
+            return stored
+        # Bootstrap race: first writer wins. A concurrent caller's INSERT hits
+        # the primary key and does nothing (or repairs a NULL/empty value), and
+        # the re-read below returns the committed winner, so both callers agree
+        # on ONE secret. Previously a second caller overwrote the stored secret
+        # and silently invalidated every session issued by the first.
         secret = secrets.token_urlsafe(48)
         cur.execute(
             "INSERT INTO system_config (key, value, value_text) VALUES ('admin_session_secret', 0, %s) "
-            "ON CONFLICT (key) DO UPDATE SET value_text = EXCLUDED.value_text;",
+            "ON CONFLICT (key) DO UPDATE SET value_text = EXCLUDED.value_text "
+            "WHERE system_config.value_text IS NULL OR system_config.value_text = '';",
             (secret,)
         )
-        return secret
+        cur.execute("SELECT value_text FROM system_config WHERE key = 'admin_session_secret'")
+        row = cur.fetchone()
+        return extract_val(row, "value_text", 0)
+
+
+# ---------------------------------------------------------------------------
+# Single-use grants for reset / invite tokens
+# ---------------------------------------------------------------------------
+# Reset and invite links are stateless JWTs, so without a server-side record a
+# captured link stays redeemable for its whole TTL. Each issuance writes the
+# token's ``jti`` into system_config under a per-(purpose, admin) key; redeeming
+# atomically deletes that key, so a token can be used at most once and issuing a
+# newer link supersedes the old one.
+
+def _grant_key(purpose: str, admin_id: int) -> str:
+    return f"token:{purpose}:{int(admin_id)}"
+
+
+def _store_grant(purpose: str, admin_id: int, jti: str) -> None:
+    with get_db_cursor(commit=True) as cur:
+        cur.execute(
+            "INSERT INTO system_config (key, value, value_text) VALUES (%s, 0, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value_text = EXCLUDED.value_text;",
+            (_grant_key(purpose, admin_id), jti),
+        )
+
+
+def _grant_active(purpose: str, admin_id: int, jti: str) -> bool:
+    if not jti:
+        return False
+    with get_db_cursor(commit=False) as cur:
+        cur.execute("SELECT value_text FROM system_config WHERE key = %s;",
+                    (_grant_key(purpose, admin_id),))
+        row = cur.fetchone()
+    return extract_val(row, "value_text", 0) == jti
+
+
+def claim_grant(purpose: str, admin_id: int, jti: str) -> bool:
+    """Atomically consume a single-use grant.
+
+    Returns True for exactly one caller: the DELETE only matches while the
+    stored jti still equals this token's, so a replayed or concurrently
+    redeemed token finds nothing to consume. Call after input validation and
+    immediately before applying the privileged change."""
+    if not jti:
+        return False
+    with get_db_cursor(commit=True) as cur:
+        cur.execute(
+            "DELETE FROM system_config WHERE key = %s AND value_text = %s;",
+            (_grant_key(purpose, admin_id), jti),
+        )
+        return cur.rowcount > 0
 
 
 def issue_session(email: str, admin_id: int) -> str:
@@ -372,14 +430,18 @@ def touch_login(admin_id: int):
 # ---------------------------------------------------------------------------
 
 def issue_reset_token(email: str, admin_id: int) -> str:
+    jti = secrets.token_urlsafe(32)
     payload = {
         "sub": str(admin_id),
         "email": email,
         "purpose": "password_reset",
+        "jti": jti,
         "iat": int(time.time()),
         "exp": int(time.time() + FORGOT_TTL_MINUTES * 60),
     }
-    return jwt.encode(payload, _session_secret(), algorithm="HS256")
+    token = jwt.encode(payload, _session_secret(), algorithm="HS256")
+    _store_grant("password_reset", admin_id, jti)
+    return token
 
 
 def verify_reset_token(token: str) -> dict | None:
@@ -391,7 +453,19 @@ def verify_reset_token(token: str) -> dict | None:
         return None
     if payload.get("purpose") != "password_reset":
         return None
-    return {"admin_id": int(payload.get("sub", 0)), "email": payload.get("email", "")}
+    admin_id = int(payload.get("sub", 0))
+    jti = payload.get("jti", "")
+    if not _grant_active("password_reset", admin_id, jti):
+        return None  # already redeemed, or superseded by a newer link
+    return {"admin_id": admin_id, "email": payload.get("email", ""), "jti": jti}
+
+
+def claim_reset_token(token: str) -> dict | None:
+    """Verify and atomically consume a reset token (single-use)."""
+    claim = verify_reset_token(token)
+    if not claim or not claim_grant("password_reset", claim["admin_id"], claim["jti"]):
+        return None
+    return claim
 
 
 # ---------------------------------------------------------------------------
@@ -399,14 +473,18 @@ def verify_reset_token(token: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def issue_invite_token(email: str, admin_id: int) -> str:
+    jti = secrets.token_urlsafe(32)
     payload = {
         "sub": str(admin_id),
         "email": email,
         "purpose": "admin_invite",
+        "jti": jti,
         "iat": int(time.time()),
         "exp": int(time.time() + INVITE_TTL_DAYS * 86400),
     }
-    return jwt.encode(payload, _session_secret(), algorithm="HS256")
+    token = jwt.encode(payload, _session_secret(), algorithm="HS256")
+    _store_grant("admin_invite", admin_id, jti)
+    return token
 
 
 def verify_invite_token(token: str) -> dict | None:
@@ -418,4 +496,16 @@ def verify_invite_token(token: str) -> dict | None:
         return None
     if payload.get("purpose") != "admin_invite":
         return None
-    return {"admin_id": int(payload.get("sub", 0)), "email": payload.get("email", "")}
+    admin_id = int(payload.get("sub", 0))
+    jti = payload.get("jti", "")
+    if not _grant_active("admin_invite", admin_id, jti):
+        return None  # already redeemed, or superseded by a newer invite
+    return {"admin_id": admin_id, "email": payload.get("email", ""), "jti": jti}
+
+
+def claim_invite_token(token: str) -> dict | None:
+    """Verify and atomically consume an invite token (single-use)."""
+    claim = verify_invite_token(token)
+    if not claim or not claim_grant("admin_invite", claim["admin_id"], claim["jti"]):
+        return None
+    return claim

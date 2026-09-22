@@ -96,7 +96,7 @@ def hub_reference(cur, hub_id: int, member_previews: int = 0) -> dict:
     as lineage only.
     """
     cur.execute(
-        "SELECT id, status, discourse_type, member_count, seed_post_id, title, handle, summary, created_at, last_updated_at "
+        "SELECT id, status, discourse_type, member_count, repost_count, seed_post_id, title, handle, summary, created_at, last_updated_at "
         "FROM event_hubs WHERE id = %s;",
         (hub_id,)
     )
@@ -104,13 +104,13 @@ def hub_reference(cur, hub_id: int, member_previews: int = 0) -> dict:
     if not r:
         return {"event_id": hub_id, "label": f"hub-{hub_id}", "status": "not_found"}
 
-    title = extract_val(r, "title", 5) or f"hub-{hub_id}"
+    title = extract_val(r, "title", 6) or f"hub-{hub_id}"
     label = title if len(title) <= PREVIEW_CHARS else title[: PREVIEW_CHARS - 1].rstrip() + "…"
 
     trailer = []
     if member_previews > 0:
         cur.execute(
-            "SELECT content FROM posts WHERE event_id = %s AND deleted_at IS NULL "
+            "SELECT content FROM posts WHERE event_id = %s AND deleted_at IS NULL AND repost_of_id IS NULL "
             "ORDER BY created_at ASC LIMIT %s;",
             (hub_id, member_previews + 1)
         )
@@ -123,17 +123,18 @@ def hub_reference(cur, hub_id: int, member_previews: int = 0) -> dict:
     return {
         "event_id": hub_id,
         "label": label,
-        "handle": extract_val(r, "handle", 6),
+        "handle": extract_val(r, "handle", 7),
         "title": title,
-        "summary": extract_val(r, "summary", 7),
+        "summary": extract_val(r, "summary", 8),
         "discourse_type": extract_val(r, "discourse_type", 2) or "event",
         "member_count": int(extract_val(r, "member_count", 3) or 0),
+        "repost_count": int(extract_val(r, "repost_count", 4) or 0),
         "status": extract_val(r, "status", 1) or "active",
         "anchor_preview": label,
-        "seed_post_id": extract_val(r, "seed_post_id", 4),
+        "seed_post_id": extract_val(r, "seed_post_id", 5),
         "member_previews": trailer[:member_previews],
-        "created_at": extract_val(r, "created_at", 8),
-        "last_updated_at": extract_val(r, "last_updated_at", 9),
+        "created_at": extract_val(r, "created_at", 9),
+        "last_updated_at": extract_val(r, "last_updated_at", 10),
     }
 
 

@@ -152,12 +152,23 @@ def apply_merge_soft(cur, source_event_id: int, target_event_id: int,
     snapshot_ids = sorted(int(extract_val(r, "id", 0)) for r in (cur.fetchall() or []))
     snapshot_count = len(snapshot_ids)
 
-    # Rebind: only non-deleted members currently on the source hub.
+    # Rebind every live member to the target hub. Canonicals stay 'assigned';
+    # folded reposts keep their 'repost' status, but MUST follow their
+    # canonical into the target: a repost stranded on the merged-away source id
+    # would (a) break the same-hub invariant (repost_of_id -> a canonical in a
+    # different event), (b) punch a hole in the topic audit (membership rooted
+    # at a merged hub id), and (c) block later exact-folds (the keeper's event
+    # would not match where the late copy landed). Resurrecting a repost to
+    # 'assigned' would leave an assigned row carrying repost_of_id (invisible
+    # to the exact-fold and never re-fixed).
     if snapshot_ids:
         cur.execute(
             """
-            UPDATE posts SET event_id = %s, assignment_status = 'assigned',
-                             assignment_updated_at = NOW()
+            UPDATE posts
+            SET event_id = %s,
+                assignment_status = CASE WHEN repost_of_id IS NULL
+                                             THEN 'assigned' ELSE 'repost' END,
+                assignment_updated_at = NOW()
             WHERE event_id = %s AND deleted_at IS NULL;
             """,
             (canonical_target, canonical_source)
@@ -178,10 +189,12 @@ def apply_merge_soft(cur, source_event_id: int, target_event_id: int,
             (new_centroid_text, canonical_target)
         )
 
-    cur.execute(
-        "UPDATE event_hubs SET member_count = member_count + %s, last_updated_at = NOW() WHERE id = %s;",
-        (snapshot_count, canonical_target)
-    )
+    # A merge may co-locate two canonicals with identical bodies (source had a
+    # repost flood whose exact copy also anchored the target, or vice versa).
+    # Fold them now and resync the true counts instead of summing raw sizes.
+    from .fold import fold_hubs
+    fold_hubs(cur, [canonical_target], near_dup=True)
+
     cur.execute(
         """
         UPDATE event_hubs SET is_active = FALSE, status = 'merged',
@@ -301,6 +314,18 @@ def reopen_merge(cur, merge_id: int, actor: str, note: str | None = None) -> dic
             (source, snapshot_ids, target)
         )
         rebound = [int(extract_val(r, "id", 0)) for r in (cur.fetchall() or [])]
+        # Rehome folded reposts WITH their canonical: a repost folded to a source
+        # canonical while it lived in target; now the canonical returns to
+        # source, and leaving the repost behind would strand it posting across
+        # hubs (repost_of_id -> a canonical in a different event). Reposts and
+        # their canonical always share a hub by the fold invariant.
+        if rebound:
+            cur.execute(
+                "UPDATE posts SET event_id = %s, assignment_updated_at = NOW() "
+                "WHERE repost_of_id = ANY(%s::int[]) AND event_id = %s AND deleted_at IS NULL "
+                "AND assignment_status = 'repost';",
+                (source, rebound, target)
+            )
         # Mirror the rebind into the membership ledger.
         move_membership(cur, rebound, source)
 
@@ -324,6 +349,9 @@ def reopen_merge(cur, merge_id: int, actor: str, note: str | None = None) -> dic
         """,
         (rebound_count, source)
     )
+    # Resync both hubs from their live membership after the rebind.
+    from .fold import sync_hub_counts
+    sync_hub_counts(cur, sorted({source, target}))
     cur.execute(
         "UPDATE hub_merges SET status = 'reopened', reopened_note = %s, reopened_at = NOW() WHERE id = %s;",
         (note, merge_id)

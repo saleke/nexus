@@ -93,6 +93,11 @@ def get_db_cursor(commit: bool = True, durable: bool = True):
             yield cur
         if commit:
             conn.commit()
+        else:
+            # A read context still opened a transaction on first execute; end it
+            # before the connection goes back to the pool, otherwise it is
+            # returned "idle in transaction" and pins a snapshot/locks.
+            conn.rollback()
     except Exception:
         conn.rollback()
         raise

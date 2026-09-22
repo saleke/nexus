@@ -17,6 +17,12 @@ from .db import get_db_cursor, extract_val
 # billing-grade limiter. Keyed by consumer_id.
 _buckets: dict[str, tuple[float, int]] = {}
 
+# Minimum interval between committed last_used_at touches (see
+# authenticate_consumer): a minute of granularity is ample for the "who's
+# active" panel, and it keeps authenticate off the synchronous-commit path.
+LAST_USED_THROTTLE_SECONDS = 60.0
+_last_touch: dict[str, float] = {}
+
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -45,25 +51,32 @@ def list_consumers() -> list[dict]:
 def authenticate_consumer(token: str) -> dict | None:
     """Resolve a consumer token to its identity, or None.
 
-    Also touches last_used_at so the admin panel can show who's active.
+    Also touches last_used_at so the admin panel can show who's active. The
+    touch is throttled to one committed write per consumer per minute: this
+    runs on EVERY authenticated request, so an unthrottled UPDATE would add a
+    synchronous fsync to the hot path.
     """
     if not token:
         return None
     digest = hash_token(token)
     with get_db_cursor(commit=True) as cur:
         cur.execute(
-            "SELECT consumer_id, name, is_active, rate_limit_per_minute FROM api_consumers WHERE token_hash = %s",
+            "SELECT consumer_id, name, is_active, rate_limit_per_minute, last_used_at FROM api_consumers WHERE token_hash = %s",
             (digest,)
         )
         row = cur.fetchone()
         if not row or not extract_val(row, "is_active", 2):
             return None
-        cur.execute("UPDATE api_consumers SET last_used_at = NOW() WHERE consumer_id = %s;", (extract_val(row, "consumer_id", 0),))
-    return {
-        "consumer_id": extract_val(row, "consumer_id", 0),
-        "name": extract_val(row, "name", 1),
-        "rate_limit_per_minute": int(extract_val(row, "rate_limit_per_minute", 3) or 60),
-    }
+        now = time.time()
+        last_touch = _last_touch.get(extract_val(row, "consumer_id", 0), 0.0)
+        if now - last_touch >= LAST_USED_THROTTLE_SECONDS:
+            cur.execute("UPDATE api_consumers SET last_used_at = NOW() WHERE consumer_id = %s;", (extract_val(row, "consumer_id", 0),))
+            _last_touch[extract_val(row, "consumer_id", 0)] = now
+        return {
+            "consumer_id": extract_val(row, "consumer_id", 0),
+            "name": extract_val(row, "name", 1),
+            "rate_limit_per_minute": int(extract_val(row, "rate_limit_per_minute", 3) or 60),
+        }
 
 
 def rate_limit_check(consumer_id: str, rate_limit_per_minute: int) -> tuple[bool, int]:

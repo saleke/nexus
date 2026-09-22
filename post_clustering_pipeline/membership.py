@@ -23,16 +23,6 @@ SEED_ROLE = "seed"
 MEMBER_ROLE = "member"
 
 
-def current_hub(cur, post_id: int) -> int | None:
-    """The post's live hub (id) as the membership ledger currently knows it."""
-    cur.execute(
-        "SELECT hub_id FROM hub_members WHERE post_id = %s AND departed_at IS NULL;",
-        (post_id,)
-    )
-    row = cur.fetchone()
-    return extract_val(row, "hub_id", 0) if row else None
-
-
 def _close_live(cur, post_id: int) -> None:
     cur.execute(
         "UPDATE hub_members SET departed_at = NOW() "
@@ -113,37 +103,3 @@ def close_membership(cur, post_id: int) -> None:
 def move_membership(cur, post_ids, to_hub: int, role: str = MEMBER_ROLE) -> None:
     """Move a batch of posts to ``to_hub`` in the ledger (merge/reopen paths)."""
     record_memberships(cur, [(pid, to_hub, role) for pid in (post_ids or [])])
-
-
-def hub_member_roles(cur, hub_id: int) -> dict[int, str]:
-    """All *live* memberships of a hub: ``{post_id: role}``."""
-    cur.execute(
-        "SELECT post_id, role FROM hub_members "
-        "WHERE hub_id = %s AND departed_at IS NULL;",
-        (hub_id,)
-    )
-    return {
-        int(extract_val(r, "post_id", 0)): extract_val(r, "role", 1) or MEMBER_ROLE
-        for r in (cur.fetchall() or [])
-    }
-
-
-def hub_membership_history(cur, hub_id: int, limit: int = 200) -> list[dict]:
-    """Admission/departure history for a hub, newest first."""
-    cur.execute(
-        """
-        SELECT post_id, hub_id, role, admitted_at, departed_at
-        FROM hub_members
-        WHERE hub_id = %s
-        ORDER BY admitted_at DESC
-        LIMIT %s;
-        """,
-        (hub_id, limit)
-    )
-    return [{
-        "post_id": extract_val(r, "post_id", 0),
-        "hub_id": extract_val(r, "hub_id", 1),
-        "role": extract_val(r, "role", 2) or MEMBER_ROLE,
-        "admitted_at": extract_val(r, "admitted_at", 3),
-        "departed_at": extract_val(r, "departed_at", 4),
-    } for r in (cur.fetchall() or [])]

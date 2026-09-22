@@ -29,9 +29,16 @@ def unlink_post(cur, post_id: int, event_id: int, actor: str = "user",
     Runs inside the caller's transaction. Returns references + similarity so
     both transports can render the same human-facing confirmation.
     """
-    cur.execute("SELECT id FROM posts WHERE id = %s AND deleted_at IS NULL;", (post_id,))
-    if not cur.fetchone():
+    cur.execute("SELECT id, repost_of_id FROM posts WHERE id = %s AND deleted_at IS NULL;", (post_id,))
+    row = cur.fetchone()
+    if not row:
         raise CorrectionError(f"post #{post_id} does not exist")
+    if extract_val(row, "repost_of_id", 1) is not None:
+        # A folded repost is represented by its canonical; unsetting it would
+        # resurrect an assigned row carrying repost_of_id and re-cluster a post
+        # whose content is byte-identical to its canonical. Operators unlink
+        # the canonical instead.
+        raise CorrectionError(f"post #{post_id} is a folded repost; unlink its canonical first")
 
     canonical_id, redirected = resolve_canonical_hub(cur, event_id)
     cur.execute("SELECT id FROM event_hubs WHERE id = %s;", (canonical_id,))
@@ -57,7 +64,7 @@ def unlink_post(cur, post_id: int, event_id: int, actor: str = "user",
         UPDATE posts
         SET event_id = NULL, assignment_status = 'candidate',
             assignment_confidence = NULL, assignment_updated_at = NOW()
-        WHERE id = %s AND event_id = %s
+        WHERE id = %s AND event_id = %s AND repost_of_id IS NULL
         RETURNING id;
         """,
         (post_id, canonical_id)
@@ -127,13 +134,15 @@ def confirm_post(cur, post_id: int, event_id: int, actor: str = "user",
     # post's real prior hub even under a concurrent confirm/assign/delete:
     # with FOR UPDATE the second writer blocks until the first commits, then
     # reads the committed event_id (no CAS drift -> no double decrement).
-    cur.execute("SELECT event_id, assignment_confidence, assignment_status FROM posts WHERE id = %s AND deleted_at IS NULL FOR UPDATE", (post_id,))
+    cur.execute("SELECT event_id, assignment_confidence, assignment_status, repost_of_id FROM posts WHERE id = %s AND deleted_at IS NULL FOR UPDATE", (post_id,))
     row = cur.fetchone()
     if not row:
         raise CorrectionError("post not found")
     old_event = extract_val(row, "event_id", 0)
     old_status = extract_val(row, "assignment_status", 2)
     confidence = extract_val(row, "assignment_confidence", 1) or 0
+    if extract_val(row, "repost_of_id", 3) is not None:
+        raise CorrectionError(f"post #{post_id} is a folded repost; confirm its canonical instead")
 
     canonical_id, redirected = resolve_canonical_hub(cur, event_id)
     cur.execute("SELECT id FROM event_hubs WHERE id = %s AND is_active = TRUE;", (canonical_id,))
@@ -141,7 +150,8 @@ def confirm_post(cur, post_id: int, event_id: int, actor: str = "user",
         raise CorrectionError("target hub not found or inactive")
 
     cur.execute(
-        "UPDATE posts SET event_id = %s, assignment_status = 'assigned', assignment_updated_at = NOW() WHERE id = %s",
+        "UPDATE posts SET event_id = %s, assignment_status = 'assigned', assignment_updated_at = NOW() "
+        "WHERE id = %s AND repost_of_id IS NULL",
         (canonical_id, post_id)
     )
     # Keep member_count in lockstep with the posts table:

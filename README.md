@@ -185,7 +185,7 @@ Security is a first-class concern: a platform that curates the feed is a high-va
 
 These are deliberate or incremental and should inform operational decisions:
 
-- The 47 `/admin` routes are `async def` handlers doing blocking db calls on the event loop (fine for single operators; move to `def` if panel concurrency ever matters).
+- The `/admin` panel has 49 routes. Read/GET handlers are plain `def` so FastAPI runs their blocking DB work in the threadpool; the ~22 form-consuming POST handlers remain `async def` because they `await request.form()` (their DB work is short and low-frequency).
 - Consumer-token hashes are SHA-256, not PBKDF2 (callers are pre-authorized trusted host services; the token is high-entropy). Password reset tokens are single-purpose JWTs with a 15-minute TTL.
 - `/docs`, `/openapi.json`, and `/redoc` are public in all environments. Restrict at the ingress if your audit policy requires it.
 - Redis is unauthenticated by default (localhost-bound in compose). Put it behind a firewall or enable `requirepass` in hostile environments.
@@ -433,9 +433,15 @@ Scheduled via Celery beat; several are also runnable standalone.
 
 | Job | Cadence | Purpose |
 |---|---|---|
-| `jobs.event_birth` | hourly | Partitions buffered posts into temporal slices, matches live hubs, builds a temporal k-NN graph, runs Louvain to birth new hubs. |
-| `quality` rollup + `threshold-autotune-daily` | 5 min / daily | Rolls feedback up; replays human decisions through the versioned calibration path and **proposes** (or applies) a `global_similarity_threshold` revision in `policy_history`. |
-| `jobs.monthly_learner` | monthly | Contrastive LoRA fine-tuning on `user_removed` feedback (triplet margin loss). |
+| `tasks.drain_ingest_hints` | every 5 s | Fast-path: batch API ingest hints into few ingest tasks (the row insert stays the durable source of truth). |
+| `tasks.reconcile_pending_posts` | every 30 s | Safety net: return stuck `processing` claims to `pending` and backstop lost Redis hints. |
+| `tasks.dispatch_webhooks_scheduled` | every 15 s | Claim outbox rows (lease + `SKIP LOCKED`), POST with backoff, and route exhausted events to the DLQ. |
+| `tasks.run_event_birth_scheduled` | hourly (`:17`) | Partitions buffered posts into temporal slices, matches live hubs, builds a temporal k-NN graph, runs Louvain to birth new hubs. |
+| `tasks.run_hub_merge_scheduled` | every 30 min (`:05`,`:35`) | Auto-detect and merge duplicate hubs through the guarded merge path. |
+| `tasks.run_quality_rollup_scheduled` | every 5 min | Roll up anchored feedback windows (idempotent, hour-bounded): has precision/coverage/unlink-rate/drift into `feedback_rollups`, split into human-graded and system-decided rows per policy/model version. |
+| `tasks.run_threshold_autotune_scheduled` | daily (`04:37`) | Replay human decisions through the versioned calibration path and **propose** (or apply, only with `AUTO_APPLY_THRESHOLD=true`) a `global_similarity_threshold` revision in `policy_history`. Gated below `MIN_FEEDBACK_SAMPLES`. |
+| `tasks.prune_delivered_outbox` | daily (`03:45`) | Delete delivered outbox rows past the retention window. |
+| `jobs.monthly_learner` | manual (on demand) | Contrastive LoRA fine-tuning on human feedback: `user_confirmed` pairs are positives, `user_removed` pairs become hard negatives (triplet margin loss), with a holdout regression guard before promotion. See [Intelligence loop](#the-intelligence-loop-how-the-system-learns). |
 | `jobs.promote_model` | as needed | Precision/recall/FP gating before promoting a candidate adapter into the `model_registry`. |
 | `tools.inspect_model` | on demand | Weight / freeze / L2-norm sanity probe. |
 
@@ -448,21 +454,37 @@ python -m post_clustering_pipeline.jobs.promote_model embedding-v2 ./models/cand
 python -m post_clustering_pipeline.tools.inspect_model
 ```
 
+All CLI/job entry points read `DATABASE_URL` from the environment — export it explicitly when running standalone.
+
+### The intelligence loop (how the system learns)
+
+The system learns from operators, not from itself. Automatic decisions are never used as training signal; only explicit human corrections are:
+
+1. **Journal** — every automatic assignment is appended to `assignment_decision_log` with the similarity used and the `policy_version`/`model_version` in effect.
+2. **Human labels** — `POST /posts/confirm`, `POST /posts/unlink`, and the panel's quality desk write `clustering_feedback_log` rows typed `user_confirmed` / `user_removed`, tagged with the versions in effect and the acting identity. System bookkeeping writes (`auto_confirmed`, `system_auto_merge`) are stored but never graded.
+3. **Rollup** — `run_quality_rollup_scheduled` (5 min) aggregates each anchored hour into `feedback_rollups`: human rows carry `precision` (confirmed / graded), `unlink_rate`, and a **drift index** (mean similarity of confirmed vs removed margins); system rows carry `coverage` (assigned share). One `'live'` partial row covers the current (open) hour so the metrics panel can tell "idle" from "stalled".
+4. **Autotune** — `run_threshold_autotune_scheduled` (daily) replays the last `TUNE_WINDOW_DAYS` of labels against the journal, scans the full precision/coverage curve (precision is non-monotone, so no first-fit scan), and — only when there are at least `MIN_FEEDBACK_SAMPLES` labels — files a **proposal** in `policy_history`. Proposals carry an impact estimate (posts that would flip) and knob warnings; an operator applies them through the calibration panel or API. `AUTO_APPLY_THRESHOLD=true` would switch to auto-apply; the default is propose-only.
+5. **Model learning** — `jobs.monthly_learner` (on demand) fine-tunes the LoRA adapter from confirmed positives and removed hard negatives (triplet margin loss), scores a 20% holdout under the *same* pairwise metric as the base model, and only promotes via `jobs.promote_model` if the candidate clears the precision gate and does not regress vs the active model. Promotion writes `model_registry` and the next `policy_version`/`model_version` stamp reflects it.
+
+Every mutation is versioned, explainable, and reversible (`policy_history`, `model_registry` with `retired`/`promoted` statuses).
+
 ---
 
 ## Automated Testing
 
 ```bash
-pytest tests/ -v            # NLP, embeddings, freezing, centroids, slicing, clustering
+pytest tests/ -v            # NLP, embeddings, freezing, centroids, slicing, clustering, intelligence rollups
 ```
 
-The unit/behavior suite targets non-DB logic. `tests/runtime/*` exercise a live stack (they write to a real database) and are excluded from the default run — point them at a scratch DB via `DATABASE_URL`.
+The unit/behavior suite targets non-DB logic (including `test_quality_rollup.py`, which locks in the human-rollup ordering guarantee: the drift estimator must not consume the aggregate result set on a shared cursor). `tests/runtime/*` exercise a live stack (they write to a real database) and are excluded from the default run — point them at a scratch DB via `DATABASE_URL`.
 
 End-to-end simulation:
 
 ```bash
 python -m post_clustering_pipeline.evaluation.simulate_full_pipeline
 ```
+
+`tests/runtime/test_clustering_stress.py` runs a deterministic corpus through the live stack by default with beat off, then runs its own audit — the canonical regression gate before any threshold/policy change.
 
 ---
 

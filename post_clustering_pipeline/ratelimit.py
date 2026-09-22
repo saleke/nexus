@@ -15,6 +15,21 @@ from .queues import get_redis_client
 
 _LOCAL_BUCKETS: dict[str, list[float]] = {}
 
+# Atomic INCR + TTL guard. The previous INCR-then-EXPIRE pair was not atomic:
+# if the EXPIRE was lost (Redis error/restart between the two commands) the
+# counter key persisted with no TTL and never reset, permanently locking the
+# account out. Running both in one Lua script makes the increment and the TTL
+# inseparable; the TTL check also repairs any legacy key that somehow lacks
+# one, while preserving the original "window starts at first failure"
+# semantics (EXPIRE is not re-extended on every hit).
+_INCR_WINDOW_LUA = """
+local c = redis.call('INCR', KEYS[1])
+if c == 1 or redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return c
+"""
+
 
 def _key(scope: str, key: str) -> str:
     return f"nexus:rl:{scope}:{key}"
@@ -48,9 +63,7 @@ def note_failure(scope: str, key: str, window: int) -> int:
     rkey = _key(scope, key)
     try:
         r = get_redis_client()
-        count = r.incr(rkey)
-        if count == 1:
-            r.expire(rkey, window)
+        count = r.eval(_INCR_WINDOW_LUA, 1, rkey, window)
         return int(count)
     except Exception:
         now = time.time()

@@ -8,6 +8,8 @@ import requests
 from datetime import datetime, timezone
 import json
 
+from psycopg2.extras import execute_values
+
 from .db import get_db_cursor
 from .config import EVENT_DELIVERY_MODE, EVENT_WEBHOOK_URL, EVENT_WEBHOOK_SIGNING_SECRET, OUTBOX_MAX_ATTEMPTS
 
@@ -57,8 +59,80 @@ def get_http_session() -> requests.Session:
     return _http_session
 
 
-def dispatch_pending_webhooks(limit: int = 50, webhook_url: str = EVENT_WEBHOOK_URL) -> int:
-    """Push leased outbox events to the configured webhook endpoint with connection pooling."""
+_CLAIM_SQL = """
+    WITH claimed AS (
+        SELECT id FROM integration_outbox
+        WHERE available_at <= NOW()
+          AND (delivery_status = 'pending' OR (delivery_status = 'leased' AND lease_until < NOW()))
+        ORDER BY id ASC
+        LIMIT %s FOR UPDATE SKIP LOCKED
+    )
+    UPDATE integration_outbox o
+    SET delivery_status = 'leased', lease_until = NOW() + INTERVAL '2 minutes', attempts = attempts + 1
+    FROM claimed c WHERE o.id = c.id
+    RETURNING o.id, o.event_type, o.post_id, o.event_id, o.payload, o.attempts;
+"""
+
+
+def _outbox_field(row, name: str, idx: int):
+    return row[name] if isinstance(row, dict) else row[idx]
+
+
+def _deliver_one(session, webhook_url: str, row) -> tuple[int, str, str | None]:
+    """POST one claimed event; return ``(outbox_id, status, error)``.
+
+    ``status`` is ``delivered`` when the host accepts, ``failed`` once the
+    attempt budget is exhausted, else ``pending`` for a later retry.
+    """
+    outbox_id = _outbox_field(row, "id", 0)
+    event_type = _outbox_field(row, "event_type", 1)
+    post_id = _outbox_field(row, "post_id", 2)
+    event_id = _outbox_field(row, "event_id", 3)
+    payload = _outbox_field(row, "payload", 4)
+    attempts = _outbox_field(row, "attempts", 5)
+
+    body = {
+        "id": outbox_id,
+        "event_type": event_type,
+        "post_id": post_id,
+        "event_id": event_id,
+        "payload": payload,
+        "dispatched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    payload_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Nexus-Event-Dispatcher/1.0",
+    }
+    signing = EVENT_WEBHOOK_SIGNING_SECRET
+    if signing:
+        # Sign the exact bytes we send; the host recomputes and compares
+        # constant-time. Uniqueness-header per event id for idempotency.
+        headers["X-Nexus-Signature"] = "sha256=" + signature_for(payload_bytes, signing)
+
+    try:
+        res = session.post(webhook_url, data=payload_bytes, headers=headers, timeout=3.0)
+        if res.status_code in {200, 201, 202, 204}:
+            circuit_breaker.record_success()
+            return outbox_id, "delivered", None
+        raise RuntimeError(f"HTTP {res.status_code}: {res.text[:200]}")
+    except Exception as exc:
+        circuit_breaker.record_failure()
+        err_msg = str(exc)[:400]
+        status = "failed" if attempts >= OUTBOX_MAX_ATTEMPTS else "pending"
+        return outbox_id, status, err_msg
+
+
+def dispatch_pending_webhooks(limit: int = 50, webhook_url: str = EVENT_WEBHOOK_URL, session=None) -> int:
+    """Push leased outbox events to the configured webhook endpoint.
+
+    Three phases so no HTTP call ever runs inside a database transaction: a
+    short claim transaction leases the batch, the network I/O happens with no
+    transaction open, and a second short transaction records the outcomes.
+    A crash between phases leaves rows leased; they are reclaimed once the
+    2-minute lease expires (delivery is therefore at-least-once, which is why
+    every payload carries its idempotency key).
+    """
     if not webhook_url or EVENT_DELIVERY_MODE != "webhook":
         return 0
     if not webhook_url.startswith(("https://", "http://")):
@@ -67,100 +141,54 @@ def dispatch_pending_webhooks(limit: int = 50, webhook_url: str = EVENT_WEBHOOK_
     if circuit_breaker.is_open():
         return 0
 
-    delivered_count = 0
-    session = get_http_session()
+    session = session or get_http_session()
 
+    # Phase 1: claim under row locks, then commit immediately to release them.
     with get_db_cursor(commit=True) as cur:
-        cur.execute(
-            """
-            WITH claimed AS (
-                SELECT id FROM integration_outbox
-                WHERE available_at <= NOW()
-                  AND (delivery_status = 'pending' OR (delivery_status = 'leased' AND lease_until < NOW()))
-                ORDER BY id ASC
-                LIMIT %s FOR UPDATE SKIP LOCKED
-            )
-            UPDATE integration_outbox o
-            SET delivery_status = 'leased', lease_until = NOW() + INTERVAL '2 minutes', attempts = attempts + 1
-            FROM claimed c WHERE o.id = c.id
-            RETURNING o.id, o.event_type, o.post_id, o.event_id, o.payload, o.attempts;
-            """,
-            (limit,)
-        )
+        cur.execute(_CLAIM_SQL, (limit,))
         rows = cur.fetchall()
 
-        if not rows:
-            return 0
+    if not rows:
+        return 0
 
-        for r in rows:
-            outbox_id = r["id"] if isinstance(r, dict) else r[0]
-            event_type = r["event_type"] if isinstance(r, dict) else r[1]
-            post_id = r["post_id"] if isinstance(r, dict) else r[2]
-            event_id = r["event_id"] if isinstance(r, dict) else r[3]
-            payload = r["payload"] if isinstance(r, dict) else r[4]
-            attempts = r["attempts"] if isinstance(r, dict) else r[5]
+    # Phase 2: network I/O with no transaction/locks held.
+    outcomes: list[tuple[int, str, str | None]] = []
+    unprocessed = []
+    for i, row in enumerate(rows):
+        if circuit_breaker.is_open():
+            unprocessed = rows[i:]
+            break
+        outcomes.append(_deliver_one(session, webhook_url, row))
 
-            body = {
-                "id": outbox_id,
-                "event_type": event_type,
-                "post_id": post_id,
-                "event_id": event_id,
-                "payload": payload,
-                "dispatched_at": datetime.now(timezone.utc).isoformat()
-            }
-            payload_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            headers = {
-                "Content-Type": "application/json",
-                "User-Agent": "Nexus-Event-Dispatcher/1.0",
-            }
-            signing = EVENT_WEBHOOK_SIGNING_SECRET
-            if signing:
-                # Sign the exact bytes we send; the host recomputes and compares
-                # constant-time. Uniqueness-header per event id for idempotency.
-                headers["X-Nexus-Signature"] = "sha256=" + signature_for(payload_bytes, signing)
+    delivered_count = sum(1 for _, status, _ in outcomes if status == "delivered")
 
-            try:
-                res = session.post(
-                    webhook_url,
-                    data=payload_bytes,
-                    headers=headers,
-                    timeout=3.0
-                )
-                if res.status_code in {200, 201, 202, 204}:
-                    cur.execute(
-                        """
-                        UPDATE integration_outbox 
-                        SET delivery_status = 'delivered', delivered_at = NOW(), lease_until = NULL 
-                        WHERE id = %s;
-                        """,
-                        (outbox_id,)
-                    )
-                    circuit_breaker.record_success()
-                    delivered_count += 1
-                else:
-                    raise RuntimeError(f"HTTP {res.status_code}: {res.text[:200]}")
-            except Exception as exc:
-                circuit_breaker.record_failure()
-                err_msg = str(exc)[:400]
-
-                if attempts >= OUTBOX_MAX_ATTEMPTS:
-                    cur.execute(
-                        """
-                        UPDATE integration_outbox 
-                        SET delivery_status = 'failed', last_error = %s, lease_until = NULL 
-                        WHERE id = %s;
-                        """,
-                        (err_msg, outbox_id)
-                    )
-                else:
-                    cur.execute(
-                        """
-                        UPDATE integration_outbox 
-                        SET delivery_status = 'pending', lease_until = NULL, 
-                            available_at = NOW() + INTERVAL '1 minute', last_error = %s 
-                        WHERE id = %s;
-                        """,
-                        (err_msg, outbox_id)
-                    )
+    # Phase 3: record outcomes and release any rows skipped after the breaker
+    # opened (undo their claim increment so a transient outage cannot push them
+    # toward the DLQ threshold).
+    with get_db_cursor(commit=True) as cur:
+        if outcomes:
+            execute_values(
+                cur,
+                """
+                UPDATE integration_outbox o
+                SET delivery_status = v.status,
+                    lease_until = NULL,
+                    last_error = CASE WHEN v.status = 'delivered' THEN o.last_error ELSE v.last_error END,
+                    delivered_at = CASE WHEN v.status = 'delivered' THEN NOW() ELSE o.delivered_at END,
+                    available_at = CASE WHEN v.status = 'pending' THEN NOW() + INTERVAL '1 minute' ELSE o.available_at END
+                FROM (VALUES %s) AS v(id, status, last_error)
+                WHERE o.id = v.id;
+                """,
+                outcomes,
+                template="(%s::int, %s::text, %s::text)",
+            )
+        if unprocessed:
+            uids = [_outbox_field(r, "id", 0) for r in unprocessed]
+            cur.execute(
+                "UPDATE integration_outbox SET delivery_status = 'pending', lease_until = NULL, "
+                "attempts = GREATEST(attempts - 1, 0) "
+                "WHERE id = ANY(%s::int[]) AND delivery_status = 'leased';",
+                (uids,),
+            )
 
     return delivered_count

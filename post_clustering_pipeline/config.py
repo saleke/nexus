@@ -80,6 +80,12 @@ BIRTH_COHESION_FLOOR = float(os.getenv("BIRTH_COHESION_FLOOR", "0.45"))
 ANCHOR_WEIGHT = float(os.getenv("ANCHOR_WEIGHT", "0.35"))
 CENTROID_MAX_MEMBERS = int(os.getenv("CENTROID_MAX_MEMBERS", "150"))
 
+# A hub counts as "recently active" for assignment/merge targeting while its
+# centroid was touched inside this window; older hubs fall out of contention so
+# candidate routing does not chase archived clubs. Single-sourced here - the
+# window was previously a replicated ``INTERVAL '48 hours'`` literal.
+ACTIVE_HUB_FRESHNESS_HOURS = float(os.getenv("ACTIVE_HUB_FRESHNESS_HOURS", "48"))
+
 # Hub reconciliation (merge) judgement. The embedder's same-topic centroid
 # cosine tops out near ~0.71 (mean ~0.57) - the historical 0.90 bar sat above
 # the ceiling and permanently froze repair (0 merges across 34 fragments).
@@ -149,6 +155,25 @@ AUTO_APPLY_THRESHOLD = os.getenv("AUTO_APPLY_THRESHOLD", "false").lower() in {"1
 # 'pending' and it is reclaimed. Contract writes always stay fully durable.
 # Set true only to force full durability everywhere as an escape hatch.
 CLAIM_DURABLE = os.getenv("CLAIM_DURABLE", "false").lower() in {"1", "true", "yes", "on"}
+
+# ---------------------------------------------------------------------------
+# Repost folding (same-hub duplicate-content collapse)
+# ---------------------------------------------------------------------------
+# A hub that receives a repost flood (1 author, 1k reposts of the same body)
+# must not display 1000 identical posts. Posts are folded in-place by content
+# signature into one canonical post per (event_id, content_sig); canonical
+# keeps event_id/status, duplicates are marked assignment_status='repost' with
+# repost_of_id -> canonical. Exact folds happen inline on every write path;
+# near-duplicate folds (edited reposts) run on the tidying sweep and at hub
+# birth only, off the streaming assignment hot path.
+REPOST_NEAR_DUP_COSINE = float(os.getenv("REPOST_NEAR_DUP_COSINE", "0.98"))
+# Cap on canonical posts considered per hub for the near-dup pass. Exact fold
+# already collapses byte-identical copies, so a hub here is mostly distinct
+# content; the cap bounds the O(n^2) pairwise cosine work.
+REPOST_FOLD_MAX_CANONICALS = int(os.getenv("REPOST_FOLD_MAX_CANONICALS", "400"))
+# Legacy rows minted before content_sig existed carry sig 0; they are backfilled
+# by the sweep in batches this large per pass.
+REPOST_BACKFILL_BATCH = int(os.getenv("REPOST_BACKFILL_BATCH", "500"))
 
 MODEL_VERSION = os.getenv("MODEL_VERSION", "embedding-v1")
 POLICY_VERSION = os.getenv("POLICY_VERSION", "policy-v1")

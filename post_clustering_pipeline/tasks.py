@@ -19,6 +19,14 @@ from .config import (
 
 PROCESSING_STALE_SECONDS = 120
 PENDING_STALL_SECONDS = 900  # 15 min: a post this old in 'pending' is a delivery anomaly
+# Encode heartbeat cadence: Phase 2 makes no DB writes, so a whole-wave encode
+# (measured 465s for 700 posts on CPU) runs far past PROCESSING_STALE_SECONDS
+# and a concurrent reconcile would reset still-encoding rows to 'pending' and
+# a second worker would double-claim them into two assignments. Encoding in
+# chunks and bumping the claimed rows' timestamp between chunks keeps active
+# work visible to the staleness sweeper. Worst gap = chunk * posture/sec:
+# 32 * ~1.6s = ~51s < 120s.
+ENCODE_HEARTBEAT_CHUNK = 32
 
 
 @celery_app.task(
@@ -142,10 +150,21 @@ def process_post_batch_ingestion(posts: list[dict]):
     if not valid_for_encoding:
         return {"status": "success", "processed": len(posts), "assigned": 0, "skipped": skipped_count}
 
-    # Phase 2: Batch Vector Encoding in PyTorch (single process-wide batch)
-    embeddings = get_embedding_engine().encode_batch(
-        [item["cleaned"] for item in valid_for_encoding], batch_size=64
-    )
+    # Phase 2: Batch Vector Encoding with progress heartbeats (see
+    # ENCODE_HEARTBEAT_CHUNK above: boundaries the encode window so the 120s
+    # staleness sweeper can never reset an actively-encoding row, which would
+    # double-claim it and emit duplicate assignments/outbox events).
+    engine = get_embedding_engine()
+    embeddings: list = []
+    for i in range(0, len(valid_for_encoding), ENCODE_HEARTBEAT_CHUNK):
+        chunk = valid_for_encoding[i:i + ENCODE_HEARTBEAT_CHUNK]
+        embeddings.extend(engine.encode_batch([item["cleaned"] for item in chunk], batch_size=32))
+        with get_db_cursor(commit=True, durable=False) as cur:
+            cur.execute(
+                "UPDATE posts SET assignment_updated_at = NOW() "
+                "WHERE id = ANY(%s::int[]) AND assignment_status = 'processing';",
+                ([item["id"] for item in chunk],),
+            )
 
     # Phase 3: Match & Assign with per-chunk commits (bounds fsync + lock hold)
     assigned_count, hub_centroid_updates, hub_membership_increments = assign_valid_for_encoding(
@@ -158,7 +177,7 @@ def process_post_batch_ingestion(posts: list[dict]):
             for eid, new_vectors in hub_centroid_updates.items():
                 cur.execute(
                     """
-                    SELECT centroid::text, member_count, seed_post_id
+                    SELECT centroid::text, member_count, repost_count, seed_post_id
                     FROM event_hubs
                     WHERE id = %s
                     FOR UPDATE;
@@ -170,8 +189,10 @@ def process_post_batch_ingestion(posts: list[dict]):
                     continue
 
                 c_text = extract_val(hub_row, "centroid", 0)
-                old_count = extract_val(hub_row, "member_count", 1) or 1
-                anchor_pid = extract_val(hub_row, "seed_post_id", 2)
+                # Centroid weight = TOTAL live members (distinct + folded
+                # reposts) so the post-fold rigidity matches pre-fold behavior.
+                old_count = (extract_val(hub_row, "member_count", 1) or 1) + (extract_val(hub_row, "repost_count", 2) or 0)
+                anchor_pid = extract_val(hub_row, "seed_post_id", 3)
 
                 c_rolling = bounded_rolling_centroid(
                     parse_vector_literal(c_text) if c_text else None,
@@ -196,20 +217,18 @@ def process_post_batch_ingestion(posts: list[dict]):
                     """
                     UPDATE event_hubs
                     SET centroid = %s::vector,
-                        member_count = member_count + %s,
                         last_updated_at = NOW()
                     WHERE id = %s;
                     """,
-                    (updated_str, len(new_vectors), eid)
+                    (updated_str, eid)
                 )
 
-            # For hubs that had matches below CENTROID_UPDATE_THRESHOLD, increment counts
-            for eid, count in hub_membership_increments.items():
-                if eid not in hub_centroid_updates:
-                    cur.execute(
-                        "UPDATE event_hubs SET member_count = member_count + %s, last_updated_at = NOW() WHERE id = %s;",
-                        (count, eid)
-                    )
+            # Resync member_count (distinct signals) / repost_count from the
+            # live membership of every touched hub. The fold may have collapsed
+            # some of the just-assigned posts into reposts; counts must never
+            # lag the deduped reality.
+            from .fold import sync_hub_counts
+            sync_hub_counts(cur, sorted(set(hub_centroid_updates) | set(hub_membership_increments)))
 
     return {
         "status": "success",
@@ -363,8 +382,8 @@ def run_event_birth_scheduled():
         # topics), so folding the duplicates immediately after creation keeps
         # the next assignment wave matching against merged centroids instead of
         # re-littering the candidate pile.
-        from .jobs.merge_hubs import reconcile_hub_merges
-        merged = reconcile_hub_merges()
+        from .jobs.merge_hubs import reconcile_hub_merges_to_fixpoint
+        merged = reconcile_hub_merges_to_fixpoint()
         return {"status": "completed", "merged_hubs": merged}
 
 
@@ -374,8 +393,8 @@ def run_hub_merge_scheduled():
     with distributed_task_lock("hub_merge_job", timeout=1800) as acquired:
         if not acquired:
             return {"status": "skipped", "reason": "Job already running"}
-        from .jobs.merge_hubs import reconcile_hub_merges
-        count = reconcile_hub_merges()
+        from .jobs.merge_hubs import reconcile_hub_merges_to_fixpoint
+        count = reconcile_hub_merges_to_fixpoint()
         return {"status": "completed", "merged_hubs": count}
 
 
@@ -452,3 +471,19 @@ def dispatch_webhooks_scheduled():
     from .dispatch import dispatch_pending_webhooks
     count = dispatch_pending_webhooks(limit=50)
     return {"dispatched_webhooks": count}
+
+
+@celery_app.task(name="post_clustering_pipeline.tasks.fold_hub_reposts_scheduled")
+def fold_hub_reposts_scheduled():
+    """Idempotent safety-net sweep that folds duplicate-content floods.
+
+    Catches every fold point the inline paths might miss (legacy rows, a merge
+    that co-located two canonicals after the fact, server downtime during
+    ingest) with one cheap indexed pass over hubs that actually hold
+    duplicates, then the bounded near-dup re-post pass.
+    """
+    with distributed_task_lock("repost_fold_job", timeout=600) as acquired:
+        if not acquired:
+            return {"status": "skipped", "reason": "Job already running"}
+        from .fold import run_fold_sweep
+        return run_fold_sweep()

@@ -115,8 +115,14 @@ def compute_rollups(cur, window_start, window_end):
         """,
         (start_iso, end_iso)
     )
+    # Capture the aggregate rows BEFORE running the drift query: psycopg2
+    # discards the previous result set as soon as a new statement executes on
+    # the same cursor, so a fetchall() after _drift_by_version would read the
+    # drift rows instead (silently dropping the human rollup when drift has no
+    # 'bad' samples, or raising KeyError on the missing aggregate columns).
+    human_rows = cur.fetchall() or []
     human_drift = _drift_by_version(cur, start_iso, end_iso)
-    for r in (cur.fetchall() or []):
+    for r in human_rows:
         pv = extract_val(r, "policy_version", 0)
         mv = extract_val(r, "model_version", 1)
         total = int(extract_val(r, "total", 2) or 0)

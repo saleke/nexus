@@ -47,7 +47,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/clustering_db
       REDIS_URL: redis://redis:6379/0
-    ports: ["8000:8000"]
+    ports: ["${API_BIND:-127.0.0.1}:8000:8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)"]
       interval: 30s

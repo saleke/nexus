@@ -20,6 +20,7 @@ from .config import (
     CENTROID_UPDATE_THRESHOLD,
     ASSIGN_CHUNK_SIZE,
     BULK_ASSIGN,
+    ACTIVE_HUB_FRESHNESS_HOURS,
 )
 from .chunks import iter_chunks
 from .db import get_db_cursor, extract_val
@@ -47,6 +48,7 @@ def _hub_strong_entities(cur, hub_ids) -> dict[int, set[str]]:
         FROM posts p
         CROSS JOIN LATERAL unnest(p.entities) AS x(ent)
         WHERE p.event_id = ANY(%s::int[]) AND p.entities IS NOT NULL
+          AND p.deleted_at IS NULL
         """,
         (list(set(hub_ids)),)
     )
@@ -63,7 +65,7 @@ def _post_strong_entities(cur, post_ids) -> dict[int, list[str]]:
     """Strong identity entities stored on the posts (captured at ingestion)."""
     if not post_ids:
         return {}
-    cur.execute("SELECT id, entities FROM posts WHERE id = ANY(%s::int[]);", (post_ids,))
+    cur.execute("SELECT id, entities FROM posts WHERE id = ANY(%s::int[]) AND deleted_at IS NULL;", (post_ids,))
     out: dict[int, list[str]] = {}
     for r in cur.fetchall() or []:
         pid = extract_val(r, "id", 0)
@@ -178,14 +180,14 @@ def _bulk_match(cur, chunk_ids: list[int]) -> dict[int, list[tuple[int | None, f
             FROM event_hubs eh
             WHERE eh.is_active = TRUE
               AND eh.centroid IS NOT NULL
-              AND eh.last_updated_at >= NOW() - INTERVAL '48 hours'
+              AND eh.last_updated_at >= NOW() - %s::interval
             ORDER BY eh.centroid <=> p.embedding
             LIMIT 2
         ) h ON TRUE
         WHERE p.id = ANY(%s::int[])
         ORDER BY p.id;
         """,
-        (chunk_ids,)
+        (f"{ACTIVE_HUB_FRESHNESS_HOURS} hours", chunk_ids)
     )
     groups: dict[int, list[tuple[int | None, float | None]]] = defaultdict(list)
     for r in cur.fetchall() or []:
@@ -351,10 +353,27 @@ def _assign_chunk_bulk(item_chunk, vec_chunk, *, assigned_count, hub_centroid_up
                 if is_assigned and pid in assigned_ids
             ])
 
+            # Fold duplicate-content floods within the freshly assigned hubs
+            # BEFORE events are written, so a repost storm lands as one
+            # canonical assignment instead of N same-post events. Idempotent
+            # and indexed; reposts keep event_id + membership for history.
+            from .fold import fold_hubs
+            assigned_hub_ids = {
+                eid for _, _, is_assigned, eid, _, _, _, _, _ in decisions
+                if is_assigned and eid
+            }
+            fold_hubs(cur, sorted(assigned_hub_ids), near_dup=False)
+            cur.execute(
+                "SELECT id FROM posts WHERE id = ANY(%s::int[]) AND repost_of_id IS NOT NULL;",
+                (sorted(assigned_ids),)
+            )
+            repost_ids = {extract_val(r, "id", 0) for r in (cur.fetchall() or [])}
+
             outbox_rows = []
             feedback_rows = []
             decision_rows = []
             for pid, vector, is_assigned, event_id, status, confidence, sim, runner_sim, reason_override in decisions:
+                is_repost = pid in repost_ids
                 if is_assigned:
                     if pid not in assigned_ids:
                         continue
@@ -364,16 +383,18 @@ def _assign_chunk_bulk(item_chunk, vec_chunk, *, assigned_count, hub_centroid_up
                         continue
                     event_type = f"post.{status}"
                     event_id = None
-                outbox_rows.append(
-                    (event_type, pid, event_id, _assign_payload_dict(event_type, pid, event_id, confidence))
-                )
-                reason = reason_override or _reason_code(sim, runner_sim, threshold, status)
+                if not is_repost:
+                    outbox_rows.append(
+                        (event_type, pid, event_id, _assign_payload_dict(event_type, pid, event_id, confidence))
+                    )
+                reason = "repost_folded" if is_repost else (reason_override or _reason_code(sim, runner_sim, threshold, status))
                 decision_rows.append(
                     (pid, event_id, sim, runner_sim, threshold,
-                     _margin_budget(sim, runner_sim, threshold), status, confidence,
+                     _margin_budget(sim, runner_sim, threshold),
+                     "repost" if is_repost else status, confidence,
                      pv, mv, reason)
                 )
-                if is_assigned:
+                if is_assigned and not is_repost:
                     feedback_rows.append((pid, event_id, confidence))
                     if confidence >= CENTROID_UPDATE_THRESHOLD:
                         hub_centroid_updates[event_id].append(vector)
@@ -451,11 +472,11 @@ def _assign_chunk_rowwise(item_chunk, vec_chunk, *, assigned_count, hub_centroid
                     FROM event_hubs eh
                     WHERE eh.is_active = TRUE
                       AND eh.centroid IS NOT NULL
-                      AND eh.last_updated_at >= NOW() - INTERVAL '48 hours'
+                      AND eh.last_updated_at >= NOW() - %s::interval
                     ORDER BY eh.centroid <=> %s::vector
                     LIMIT 2;
                 """
-                cur.execute(query_active, (vector_str, vector_str))
+                cur.execute(query_active, (vector_str, f"{ACTIVE_HUB_FRESHNESS_HOURS} hours", vector_str))
                 matches = cur.fetchall()
 
                 match = matches[0] if matches else None

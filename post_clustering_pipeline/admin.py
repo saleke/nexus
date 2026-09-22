@@ -13,15 +13,17 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
-from .config import PACKAGE_DIR, API_AUTH_TOKEN
+from .config import PACKAGE_DIR, API_AUTH_TOKEN, AUTO_ASSIGN_THRESHOLD
 from .db import get_db_cursor, extract_val
 from .policy import (
     KNOB_RANGES, KNOB_WARNINGS, current_versions, apply_policy_change,
@@ -37,6 +39,50 @@ templates = Jinja2Templates(directory=os.path.join(PACKAGE_DIR, "templates", "ad
 TEMPLATE_METADATA = {"type": "text/html", "Cache-Control": "no-store"}
 
 DEFAULT_ACTOR = "panel"
+
+_URL_SECRET_QUERY = re.compile(
+    r"(?i)^(token|secret|password|passwd|pwd|key|api_key|apikey|signature|sig|access_token|auth)$"
+)
+
+
+def _redact_config_value(name: str, val, name_is_secret: bool) -> tuple[object, bool]:
+    """Return ``(display_value, sensitive)`` for the settings page.
+
+    Secret-named knobs are fully masked. String values that look like URLs get
+    their userinfo password and any secret-ish query parameters masked, so
+    DATABASE_URL / REDIS_URL / EVENT_WEBHOOK_URL cannot leak live credentials
+    into the rendered page (the previous name-only regex missed them)."""
+    if name_is_secret:
+        return "********", True
+    if not isinstance(val, str) or "://" not in val:
+        return val, False
+    try:
+        parts = urlsplit(val)
+    except ValueError:
+        return val, False
+    changed = False
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, _, host = netloc.rpartition("@")
+        if ":" in userinfo:
+            user = userinfo.split(":", 1)[0]
+            netloc = f"{user}:****@{host}"
+            changed = True
+    query = parts.query
+    if query:
+        pairs = []
+        for k, v in parse_qsl(query, keep_blank_values=True):
+            if _URL_SECRET_QUERY.match(k):
+                pairs.append((k, "****"))
+                changed = True
+            else:
+                pairs.append((k, v))
+        if changed:
+            query = urlencode(pairs, safe="*")
+    if not changed:
+        return val, False
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)), True
+
 
 PRECISION_LABELS = {
     "confident_assign": ("ok", "confident assign"),
@@ -97,7 +143,7 @@ def _render_admins_fragment(request: Request, search: str = "", status: str = ""
 
 
 @router.get("/settings/admins", include_in_schema=False)
-async def panel_settings_admins(request: Request, q: str = "", status: str = "",
+def panel_settings_admins(request: Request, q: str = "", status: str = "",
                                 limit: int = 25, offset: int = 0, partial: int = 0):
     """Admin-list fragment: search + status filter + load-more pagination.
     `partial=1` returns just the table rows (for the load-more row)."""
@@ -125,12 +171,12 @@ async def panel_settings_admins(request: Request, q: str = "", status: str = "",
 
 @router.get("", include_in_schema=False)
 @router.get("/", include_in_schema=False)
-async def panel_index(request: Request):
-    return await panel_quality(request)
+def panel_index(request: Request):
+    return panel_quality(request)
 
 
 @router.get("/health/ready", include_in_schema=False)
-async def panel_health_ready():
+def panel_health_ready():
     """Owner-panel alias of the public /health/ready probe (returns an HTML pill)."""
     with get_db_cursor(commit=False) as cur:
         cur.execute("SELECT COUNT(*) AS dlq_count FROM integration_outbox WHERE delivery_status = 'failed'")
@@ -188,7 +234,7 @@ def _current_admin(request: Request) -> dict | None:
 
 
 @router.get("/login", include_in_schema=False)
-async def panel_login(request: Request):
+def panel_login(request: Request):
     from .admin_auth import admin_count
     from . import config as cfg
     google_errors = {
@@ -261,7 +307,7 @@ async def panel_login_submit(request: Request):
 
 
 @router.post("/logout", include_in_schema=False)
-async def panel_logout(request: Request):
+def panel_logout(request: Request):
     from fastapi.responses import RedirectResponse
     resp = RedirectResponse(url="/admin/login", status_code=303)
     resp.delete_cookie("nexus_admin_session", path="/admin")
@@ -269,7 +315,7 @@ async def panel_logout(request: Request):
 
 
 @router.get("/register", include_in_schema=False)
-async def panel_register(request: Request):
+def panel_register(request: Request):
     from .admin_auth import admin_count
     if admin_count() > 0:
         from fastapi.responses import RedirectResponse
@@ -311,7 +357,7 @@ async def panel_register_submit(request: Request):
 # ---------------------------------------------------------------------------
 
 @router.get("/login/google", include_in_schema=False)
-async def panel_login_google(request: Request):
+def panel_login_google(request: Request):
     import secrets
     from fastapi.responses import RedirectResponse
     from . import config as cfg
@@ -334,7 +380,7 @@ async def panel_login_google(request: Request):
 
 
 @router.get("/auth/google/callback", include_in_schema=False)
-async def panel_google_callback(request: Request):
+def panel_google_callback(request: Request):
     from fastapi.responses import RedirectResponse
     import requests as _req
     from . import config as cfg
@@ -394,7 +440,7 @@ def _urlenc(value: str) -> str:
 
 
 @router.get("/forgot", include_in_schema=False)
-async def panel_forgot(request: Request):
+def panel_forgot(request: Request):
     return templates.TemplateResponse(request, "forgot.html",
         _ctx(request, step="email", email="", error=None),
         headers=TEMPLATE_METADATA)
@@ -447,7 +493,7 @@ async def panel_forgot_submit(request: Request):
 
 @router.post("/reset", include_in_schema=False)
 async def panel_reset_submit(request: Request):
-    from .admin_auth import verify_reset_token, update_password
+    from .admin_auth import verify_reset_token, claim_reset_token, update_password
     from fastapi.responses import RedirectResponse
     form = await request.form()
     token = form.get("token", "")
@@ -465,6 +511,14 @@ async def panel_reset_submit(request: Request):
     if len(password) < 10:
         return templates.TemplateResponse(request, "reset.html",
             _ctx(request, token=token, error="password must be at least 10 characters"),
+            headers=TEMPLATE_METADATA)
+    # Single-use: atomically consume the grant immediately before applying the
+    # change. A replayed link (or a concurrent second submit) loses the race and
+    # is rejected here rather than silently resetting the password again.
+    claim = claim_reset_token(token)
+    if not claim:
+        return templates.TemplateResponse(request, "reset.html",
+            _ctx(request, token=token, error="reset link already used or expired"),
             headers=TEMPLATE_METADATA)
     update_password(claim["admin_id"], password)
     from .audit import log_admin_action
@@ -631,7 +685,7 @@ async def panel_invite_admin(request: Request):
 
 
 @router.get("/invite/{token}", include_in_schema=False)
-async def panel_invite_accept(request: Request, token: str):
+def panel_invite_accept(request: Request, token: str):
     """Guest opens the invite link: verifies and shows a set-password form."""
     from .admin_auth import verify_invite_token
     claim_invite = verify_invite_token(token)
@@ -647,7 +701,7 @@ async def panel_invite_accept(request: Request, token: str):
 @router.post("/invite/{token}", include_in_schema=False)
 async def panel_invite_accept_submit(request: Request, token: str):
     """Guest sets their own password and becomes an active admin."""
-    from .admin_auth import verify_invite_token, update_password
+    from .admin_auth import verify_invite_token, claim_invite_token, update_password
     from .audit import log_admin_action
     from fastapi.responses import RedirectResponse
     claim_invite = verify_invite_token(token)
@@ -666,6 +720,13 @@ async def panel_invite_accept_submit(request: Request, token: str):
         return templates.TemplateResponse(request, "invite.html",
             _ctx(request, token=token, email=claim_invite["email"],
                  error="password must be at least 10 characters"),
+            headers=TEMPLATE_METADATA)
+    # Single-use: consume the invite grant atomically before activating the
+    # account, so the link cannot be replayed to reset the password again.
+    claim_invite = claim_invite_token(token)
+    if not claim_invite:
+        return templates.TemplateResponse(request, "reset.html",
+            _ctx(request, token=token, error="invite link already used or expired"),
             headers=TEMPLATE_METADATA)
     update_password(claim_invite["admin_id"], password)
     with get_db_cursor(commit=True) as cur:
@@ -720,7 +781,7 @@ async def panel_delete_admin(request: Request, admin_id: int):
 
 
 @router.get("/quality")
-async def panel_quality(request: Request, windows: int = 14, source: str = "",
+def panel_quality(request: Request, windows: int = 14, source: str = "",
                         sort: str = "window_desc", partial: int = 0):
     with get_db_cursor(commit=False) as cur:
         pv, mv = current_versions(cur)
@@ -728,7 +789,7 @@ async def panel_quality(request: Request, windows: int = 14, source: str = "",
             "SELECT value FROM system_config WHERE key = 'global_similarity_threshold';"
         )
         row = cur.fetchone()
-        threshold = float(extract_val(row, "value", 0) or 0.88)
+        threshold = float(extract_val(row, "value", 0) or AUTO_ASSIGN_THRESHOLD)
 
         cur.execute(
             "SELECT DISTINCT source FROM feedback_rollups ORDER BY 1"
@@ -832,7 +893,7 @@ async def panel_quality(request: Request, windows: int = 14, source: str = "",
 
 
 @router.get("/decisions")
-async def panel_decisions(request: Request, post_id: str | None = None,
+def panel_decisions(request: Request, post_id: str | None = None,
                           hub_id: str | None = None, limit: int = 100,
                           window: str = "24h", status: str = "",
                           sort: str = "time_desc", offset: int = 0, partial: int = 0):
@@ -945,7 +1006,7 @@ async def panel_decisions(request: Request, post_id: str | None = None,
 # ---------------------------------------------------------------------------
 
 @router.get("/refs")
-async def refs_fragment(request: Request, q: str = "", kind: str = "hub", limit: int = 8,
+def refs_fragment(request: Request, q: str = "", kind: str = "hub", limit: int = 8,
                         slot: str = ""):
     """HTMX search fragment: labeled hub/post cards for the merge desk and the
     unlink/confirm pickers. ``slot=confirm`` renders buttons that write into the
@@ -1030,7 +1091,7 @@ _GRAPH_CACHE_TTL = 30.0
 
 
 @router.get("/hub-graph")
-async def hub_graph(request: Request):
+def hub_graph(request: Request):
     """Live hub network for the desk/quality visualizations: every active hub as
     a node (short callsign + label + member count + discourse-type color) plus
     three kinds of real edges that chain the hubs into a network:
@@ -1163,7 +1224,7 @@ async def hub_graph(request: Request):
 
 
 @router.get("/hub-detail")
-async def hub_detail(request: Request):
+def hub_detail(request: Request):
     """Tiny on-click detail for a globe unit - never the full hub. What a
     human reaching for a node actually wants: the id, the callsign/name, and a
     few member post names. Kept deliberately light (see refs.hub_reference)."""
@@ -1306,7 +1367,7 @@ async def panel_pick_post(request: Request):
 
 
 @router.get("/pick-clear")
-async def panel_pick_clear(request: Request):
+def panel_pick_clear(request: Request):
     return Response("", media_type="text/html")
 
 
@@ -1325,7 +1386,7 @@ async def panel_reopen(request: Request, merge_id: int):
 
 
 @router.get("/desk")
-async def panel_desk(request: Request):
+def panel_desk(request: Request):
     """Merge desk: search-anchored hub pickers, no bare ids. The operator pastes
     any remembered fragment -> labeled cards -> selects source/target -> merge.
     The desk also hosts the unlink/confirm correction flow for a searched post."""
@@ -1334,7 +1395,7 @@ async def panel_desk(request: Request):
 
 
 @router.get("/merges")
-async def panel_merges(request: Request, limit: int = 50, status: str = "", q: str = ""):
+def panel_merges(request: Request, limit: int = 50, status: str = "", q: str = ""):
     status = (status or "").strip().lower()
     q = (q or "").strip()
     where = []
@@ -1418,12 +1479,12 @@ def _calibration_history(cur) -> list:
 
 
 @router.get("/calibration")
-async def panel_calibration(request: Request):
+def panel_calibration(request: Request):
     with get_db_cursor(commit=False) as cur:
         pv, mv = current_versions(cur)
         cur.execute("SELECT value FROM system_config WHERE key = 'global_similarity_threshold';")
         row = cur.fetchone()
-        threshold = float(extract_val(row, "value", 0) or 0.88)
+        threshold = float(extract_val(row, "value", 0) or AUTO_ASSIGN_THRESHOLD)
         history = _calibration_history(cur)
     knobs = [{
         "name": k,
@@ -1530,7 +1591,7 @@ async def panel_calibration_revert(request: Request, history_id: int):
 # ---------------------------------------------------------------------------
 
 @router.get("/ops")
-async def panel_ops(request: Request):
+def panel_ops(request: Request):
     from redis import RedisError
     from .queues import get_redis_client
     with get_db_cursor(commit=False) as cur:
@@ -1578,7 +1639,7 @@ async def panel_ops(request: Request):
 
 
 @router.post("/ops/resume-stuck")
-async def panel_resume_stuck(request: Request):
+def panel_resume_stuck(request: Request):
     with get_db_cursor(commit=True) as cur:
         cur.execute(
             """
@@ -1596,7 +1657,7 @@ async def panel_resume_stuck(request: Request):
 
 
 @router.post("/ops/retry-dlq")
-async def panel_retry_dlq(request: Request):
+def panel_retry_dlq(request: Request):
     with get_db_cursor(commit=True) as cur:
         cur.execute(
             """
@@ -1645,7 +1706,7 @@ async def panel_create_consumer(request: Request):
 
 
 @router.post("/consumers/{consumer_id}/toggle")
-async def panel_toggle_consumer(request: Request, consumer_id: str):
+def panel_toggle_consumer(request: Request, consumer_id: str):
     with get_db_cursor(commit=True) as cur:
         cur.execute(
             "UPDATE api_consumers SET is_active = NOT is_active WHERE consumer_id = %s RETURNING is_active;",
@@ -1662,7 +1723,7 @@ async def panel_toggle_consumer(request: Request, consumer_id: str):
 
 
 @router.post("/consumers/{consumer_id}/delete")
-async def panel_delete_consumer(request: Request, consumer_id: str):
+def panel_delete_consumer(request: Request, consumer_id: str):
     from .consumers import delete_consumer
     from .audit import log_admin_action
     if not delete_consumer(consumer_id):
@@ -1678,7 +1739,7 @@ async def panel_delete_consumer(request: Request, consumer_id: str):
 # ---------------------------------------------------------------------------
 
 @router.get("/audit")
-async def panel_audit(request: Request, actor: str = "", domain: str = "",
+def panel_audit(request: Request, actor: str = "", domain: str = "",
                       entity: str = "", window: str = "", q: str = "",
                       limit: int = 0, offset: int = 0, frag: str = ""):
     """Audit log: scannable entries with filters, paging, and a per-entry diff.
@@ -1724,7 +1785,7 @@ async def panel_audit(request: Request, actor: str = "", domain: str = "",
 
 
 @router.get("/settings")
-async def panel_settings(request: Request):
+def panel_settings(request: Request):
     from . import config as cfg
     import re as _re
     secret_hint = _re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|HASH)", _re.IGNORECASE)
@@ -1747,13 +1808,14 @@ async def panel_settings(request: Request):
         if not isinstance(val, (int, float, str, bool)):
             continue
         sensitive = bool(secret_hint.search(name))
+        display_value, sensitive = _redact_config_value(name, val, sensitive)
         env_set = name in os.environ
         section = next((s for s in _SECTIONS if _re.match(s[2], name)), ("other", "Other", ""))
         env_knobs.append({
             "name": name,
             "section": section[0],
             "section_label": section[1],
-            "value": "********" if sensitive else val,
+            "value": display_value,
             "sensitive": sensitive,
             "env_set": env_set,
             "kind": "bool" if isinstance(val, bool) else
@@ -1787,7 +1849,7 @@ async def panel_settings(request: Request):
     with get_db_cursor(commit=False) as cur:
         cur.execute("SELECT value FROM system_config WHERE key = 'global_similarity_threshold';")
         row = cur.fetchone()
-        threshold = float(extract_val(row, "value", 0) or 0.88)
+        threshold = float(extract_val(row, "value", 0) or AUTO_ASSIGN_THRESHOLD)
     knobs = [{
         "name": k,
         "lo": v[0], "hi": v[1], "decimals": v[2],

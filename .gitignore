@@ -11,3 +11,5 @@ build/
 celerybeat-schedule*
 logs/
 *.pid
+
+backups/

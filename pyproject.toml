@@ -32,6 +32,20 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["post_clustering_pipeline*"]
 
+# Non-.py runtime assets the app loads by path (Jinja templates, the admin
+# static bundle, SQL schema/migrations, the design doc). Without this a wheel
+# install omits them and the admin panel/schema bootstrap break; the Docker
+# build only worked because it COPYs the source tree before `pip install .`.
+[tool.setuptools.package-data]
+"post_clustering_pipeline" = [
+  "schema.sql",
+  "requirements.txt",
+  "templates/admin/*.html",
+  "static/*",
+  "migrations/*.sql",
+  "panel_design/*.md",
+]
+
 [project.scripts]
 nexus-api = "post_clustering_pipeline.api:run"
 nexus-celery-worker = "post_clustering_pipeline.queues:worker_main"

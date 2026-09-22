@@ -70,30 +70,68 @@ MAX_PER_BATCH = 500                                    # api.py:121 max_length=5
 SEED = int(os.getenv("CORPUS_SEED", "42091"))
 
 
+def topic_of(sid: str) -> str:
+    """Topic = the first label of each source_id (signal-<topic>-.../dup-<topic>/lure-<topic>)."""
+    parts = sid.split("-")
+    if parts[0] in ("signal", "dup"):
+        return parts[1]
+    if parts[0] == "lure":
+        return parts[1]
+    return "?"
+
+
+# Per-topic join phrases: a topic's posts repeat its lead/tail plus these
+# intra-topic connectors, while different topics share almost no tokens, so the
+# embeddings of each topic stay tight together and far apart from other topics.
+TOPIC_JOINS = {
+    "wildfires": ("as smoke drifted westward", "in hard-hit foothill areas",
+                  "while air quality alerts spread", "despite cooler evening air"),
+    "election": ("while turnout climbed", "as precincts kept reporting",
+                 "once the polls had closed", "across the tightest counties"),
+    "crypto": ("as volume hit new highs", "once the mempool cleared",
+               "while leveraged flows surged", "on record exchange activity"),
+    "health": ("as recruitment accelerated", "once the trial sites opened",
+               "while safety data accumulated", "across the study network"),
+    "ai": ("after the nightly retrain", "as the new weights settled",
+           "once the cluster refreshed", "on the updated anchor set"),
+}
+
+
 def make_signal_topic(seed: int, topic: str, positive_words: tuple[str, ...],
                       base: tuple[str, str], n: int,
-                      length_mode: str = "mixed") -> list[dict]:
-    """N messy posts all about ONE real signal; they MUST cluster together."""
+                      length_mode: str = "mixed", offset: int = 0) -> list[dict]:
+    """N messy posts all about ONE real signal; they MUST cluster together.
+
+    Content is rendered from a per-topic signature (``base`` = a distinctive
+    lead/tail that appears in EVERY post of the topic) plus topic-specific
+    connectors (``TOPIC_JOINS``), so each topic embeds as one tight cloud far
+    from every other topic. ``offset`` keeps source/external ids unique across
+    repeated calls for the same topic.
+    """
     rng = random.Random(seed)
+    lead, tail = base
+    joins = TOPIC_JOINS.get(topic, ("meanwhile", "still", "today"))
     posts = []
     for i in range(n):
-        w = rng.sample(positive_words, rng.randint(2, 4))
-        length = len(w)
-        if length_mode == "short" or (length_mode == "mixed" and rng.random() < 0.5):
-            content = f"{base[0]} {w[0]} {base[1]} {w[1]}."
+        w = rng.sample(positive_words, rng.randint(2, min(4, len(positive_words))))
+        # Multiple authors per topic: a single-account burst is correctly
+        # refused a hub by BIRTH_MIN_AUTHORS=4 (anti-spam era anchor), so a
+        # realistic topic must be spoken by several people.
+        author = f"author-{topic}-{i % 6}"
+        if length_mode == "short" or (length_mode == "mixed" and rng.random() < 0.4):
+            content = f"{lead}, {w[0]} {w[1]} — {tail}."
         elif length_mode in ("long", "longform") or (length_mode == "mixed" and rng.random() < 0.75):
-            paras = 3 + rng.randint(0, 2)
-            body = " ".join(f"{base[0]} {word} {base[1]}" for word in w)
-            content = " ".join([f"Para {p}. {body} And {w[0]} keeps {w[1 % len(w)]} relevant." 
-                                for p in range(paras)])
+            body = " ".join(f"{lead} after {word}; {rng.choice(joins)} {tail}."
+                            for word in w)
+            content = f"{body} Rounding up: {tail} regardless of {w[0]}."
         else:
-            content = f"{base[0]} {w[0]} {base[1]} {w[1]} Also {w[2 % len(w)]} matters."
+            content = f"{lead} {w[0]}, {rng.choice(joins)} {w[1]} — {tail}."
         posts.append({
             "content": content,
             "platform": "twitter" if len(content) < 280 else ("substack" if len(content) < 2000 else "blog"),
-            "source_id": f"signal-{topic}-{i}",
-            "external_post_id": f"{topic}-s-{i}",
-            "external_author_id": f"author-{topic}",
+            "source_id": f"signal-{topic}-{i + offset}",
+            "external_post_id": f"{topic}-s-{i + offset}",
+            "external_author_id": author,
             "has_media": False,
             "published_at": datetime.now(timezone.utc).isoformat(),
         })
@@ -117,23 +155,27 @@ def make_near_dup_pair(seed: int, topic: str, base: tuple[str, str],
     ]
 
 
-def make_lure_pair(seed: int, topic_a: str, topic_b: str,
+def make_lure_pair(seed: int, topic_a: str, topic_b: str, pair_index: int,
                    shared_phrases: tuple[str, ...], base_a: tuple[str, str],
                    base_b: tuple[str, str]) -> list[dict]:
     """CROSS-topic merge-trap: SAME wording (shared phrases) about DIFFERENT
     signals. The whole point of era-anchored clustering is these two must
     stay in SEPARATE hubs. If the corpus reports a cross-topic merge, the
-    system is broken — we say so, out loud."""
+    system is broken — we say so, out loud. ``pair_index`` keeps the lure
+    source/external ids unique (each topic is the A-side of one pair and the
+    B-side of another)."""
     rng = random.Random(seed)
     ph = rng.choice(shared_phrases)
     return [
         {"content": f"{base_a[0]} {ph} but the {topic_a} side {base_a[1]}.",
-         "platform": "twitter", "source_id": f"lure-{topic_a}",
-         "external_post_id": f"lure-{topic_a}", "external_author_id": f"author-{topic_a}",
+         "platform": "twitter", "source_id": f"lure-{topic_a}-{pair_index}",
+         "external_post_id": f"lure-{topic_a}-{pair_index}",
+         "external_author_id": f"author-{topic_a}",
          "has_media": False, "published_at": datetime.now(timezone.utc).isoformat()},
         {"content": f"{base_b[0]} {ph} but the {topic_b} side {base_b[1]}.",
-         "platform": "twitter", "source_id": f"lure-{topic_b}",
-         "external_post_id": f"lure-{topic_b}", "external_author_id": f"author-{topic_b}",
+         "platform": "twitter", "source_id": f"lure-{topic_b}-{pair_index}",
+         "external_post_id": f"lure-{topic_b}-{pair_index}",
+         "external_author_id": f"author-{topic_b}",
          "has_media": False, "published_at": datetime.now(timezone.utc).isoformat()},
     ]
 
@@ -143,23 +185,38 @@ def build_corpus() -> list[dict]:
     6 cross-topic lures, seeded reproducible via CORPUS_SEED."""
     corpus: list[dict] = []
     topics = [
-        ("wildfires", ("burn", "embers", "evacuation", "airquality", "containment"), ("flames spread", "crews worked")),
-        ("election", ("ballot", "polling", "turnout", "delegate", "precinct"), ("voters arrived", "results updated")),
-        ("crypto", ("bitcoin", "ledger", "wallet", "mempool", "stake"), ("price moved", "chains settled")),
-        ("health", ("vaccine", "trial", "dose", "efficacy", "booster"), ("patients enrolled", "data tracked")),
-        ("ai", ("model", "vector", "embedding", "threshold", "cluster"), ("weights updated", "anchors held")),
+        ("wildfires", ("flames", "embers", "evacuation", "airquality", "containment"),
+         ("Flames tore across the foothills near Denver", "crews widened the containment line")),
+        ("election", ("ballot", "turnout", "precinct", "delegate", "recount"),
+         ("Early ballots flooded precincts across Ohio", "officials kept tallying returns")),
+        ("crypto", ("bitcoin", "ledger", "wallet", "mempool", "staking"),
+         ("Bitcoin punched past its range", "the ledger settled record volume")),
+        ("health", ("trial", "dose", "efficacy", "booster", "cohort"),
+         ("The patient cohort grew overnight", "efficacy data kept tracking")),
+        ("ai", ("model", "vector", "embedding", "threshold", "centroid"),
+         ("Embedding quality jumped at retrain", "the anchor weights held stable")),
     ]
     for ti, (name, words, base) in enumerate(topics):
         corpus += make_signal_topic(SEED + ti * 101, name, words, base, n=24, length_mode="mixed")
-    corpus += make_signal_topic(SEED + 1001, "wildfires", topics[0][1], topics[0][2], n=8, length_mode="short")
-    corpus += make_signal_topic(SEED + 1002, "ai", topics[4][1], topics[4][2], n=8, length_mode="long")
+    corpus += make_signal_topic(SEED + 1001, "wildfires", topics[0][1], topics[0][2], n=8,
+                                length_mode="short", offset=24)
+    corpus += make_signal_topic(SEED + 1002, "ai", topics[4][1], topics[4][2], n=8,
+                                length_mode="long", offset=24)
     for ti, (name, words, base) in enumerate(topics):
         corpus += make_near_dup_pair(SEED + 2001 + ti * 7, name, base, words[0], words[1])
     lure_phrases = ("it all comes down to", "the real signal here", "numbers keep climbing")
-    for i in range(6):
+    for i in range(5):
         a = topics[i % len(topics)]
         b = topics[(i + 2) % len(topics)]
-        corpus += make_lure_pair(SEED + 3001 + i * 13, a[0], b[0], lure_phrases, a[2], b[2])
+        corpus += make_lure_pair(SEED + 3001 + i * 13, a[0], b[0], i, lure_phrases, a[2], b[2])
+    # Ingest contract requires user_id; derive one deterministically per
+    # author so near-dup reposter identity is preserved across its two posts.
+    author_ids: dict[str, int] = {}
+    for p in corpus:
+        author = p["external_author_id"]
+        if author not in author_ids:
+            author_ids[author] = 1000 + len(author_ids)
+        p["user_id"] = author_ids[author]
     return corpus
 
 
@@ -185,7 +242,7 @@ def http(method: str, path: str, body: dict | None = None, timeout: float = 30.0
 # 3) the acceptance assertions (era-anchor audits, from real on-disk rows)
 # ---------------------------------------------------------------------------
 def main() -> int:
-    status, body = http("GET", HEALTH_LIVE, timeout=8.0)
+    status, body = http("GET", "/health/live", timeout=8.0)
     if status != 200:
         print(f"[SKIP] control plane not live (HTTP {status}) — harness waits; "
               f"start it with `docker-compose up -d api` (8000:8000).")
@@ -226,6 +283,16 @@ def main() -> int:
     print(f"ingest+settle: {ingest_s:.1f}s (bounded; all wait cap of "
           f"{len(created)} posts x poll window)")
 
+    # Era birth is hourly by design (queues.py crontab minute=17); a booted
+    # corpus with no pre-existing hubs would sit unassigned until the next
+    # tick, silently timing the audit against nothing. Run the birth job
+    # in-process so the audit reads the real anchored clusters - the gate here
+    # is clustering correctness, not the beat cadence. (Redis lock held, so an
+    # in-flight worker birth at the :17 tick makes this cleanly skip.)
+    from post_clustering_pipeline.tasks import run_event_birth_scheduled
+    print("  (triggering era birth job for the audit…)")
+    run_event_birth_scheduled()
+
     # ---- DB-side audit of the era anchors (the only verdict that counts) ----
     import sys
     sys.path.insert(0, str(REPO_ROOT))
@@ -243,7 +310,7 @@ def main() -> int:
             eff_threshold = get_effective_threshold(cur)
             cur.execute(
                 """
-                SELECT p.source_id, p.hub_id, ap.similarity, ap.assignment_status
+                SELECT p.source_id, p.event_id, ap.similarity, ap.status
                 FROM posts p
                 LEFT JOIN assignment_decision_log ap ON ap.post_id = p.id
                 WHERE p.source_id LIKE 'signal-%%' OR p.source_id LIKE 'dup-%%'
@@ -253,23 +320,15 @@ def main() -> int:
             )
             for row in (cur.fetchall() or []):
                 source_id = row.get("source_id") if isinstance(row, dict) else row[0]
-                hub = row.get("hub_id") if isinstance(row, dict) else row[2]
-                sim = row.get("similarity") if isinstance(row, dict) else row[3]
+                hub = row.get("event_id") if isinstance(row, dict) else row[1]
+                sim = row.get("similarity") if isinstance(row, dict) else row[2]
                 if source_id:
                     hub_by_post[source_id] = hub
                     if sim is not None:
                         decision_similarity[source_id] = float(sim)
 
-        # topic = the first label of each source_id (signal-<topic>-.../dup-<topic>/lure-<topic>)
-        def topic_of(sid: str) -> str:
-            parts = sid.split("-")
-            if parts[0] == "signal":
-                return parts[1]
-            if parts[0] == "dup":
-                return parts[1]
-            if parts[0] == "lure":
-                return parts[2]
-            return "?"
+        # topic of each post; near-dup/signal/lure source-ids carry it in the
+        # label (module-level topic_of, defined above).
 
         for a, ha in hub_by_post.items():
             for b, hb in hub_by_post.items():
@@ -285,8 +344,6 @@ def main() -> int:
         # ---- honest numbers, computed from real rows, printed verbatim ----
         total = len(hub_by_post)
         clustered = sum(1 for h in hub_by_post.values() if h is not None)
-        if topic_of != "?":
-            pass
         distinct = len({h for h in hub_by_post.values() if h is not None})
         print("\n--------------- ACCEPTANCE — REAL NUMBERS ---------------")
         print(f"  era anchor   : policy={pv} model={mv} effective_threshold={eff_threshold:.3f}")

@@ -11,15 +11,16 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from .db import get_db_cursor
-from .queues import bounded_push_ingest_hints as queues_bounded_push_ingest_hints, get_redis_client
+from .queues import bounded_push_ingest_hints as queues_bounded_push_ingest_hints
 from .config import (
     OUTBOX_MAX_ATTEMPTS, API_AUTH_TOKEN,
-    INGEST_HINTS_KEY, PACKAGE_DIR,
+    PACKAGE_DIR,
 )
 from .events import write_outbox
 from .membership import close_membership
 from .refs import hub_reference
-from .merges import client_merge
+from .nlp import content_signature
+from .merges import client_merge, resolve_canonical_hub
 from .corrections import unlink_post as unlink_correction, confirm_post as confirm_correction, CorrectionError
 from .consumers import authenticate_consumer, rate_limit_check
 from .admin import router as admin_router
@@ -244,12 +245,14 @@ def run():
 # --- Request Models ---
 class PostCreateRequest(BaseModel):
     user_id: int
-    content: str
+    # Bounded to match the storage columns: an unbounded content/platform/etc.
+    # either exhausts memory or overflows a VARCHAR and surfaces as a 500.
+    content: str = Field(max_length=100_000)
     has_media: bool = False
-    platform: str = "unknown"
-    source_id: str = "legacy"
-    external_post_id: str | None = None
-    external_author_id: str | None = None
+    platform: str = Field(default="unknown", max_length=50)
+    source_id: str = Field(default="legacy", max_length=200)
+    external_post_id: str | None = Field(default=None, max_length=300)
+    external_author_id: str | None = Field(default=None, max_length=300)
     published_at: datetime | None = None
 
 
@@ -266,14 +269,14 @@ class FeedbackRemoveRequest(BaseModel):
 class FeedbackConfirmRequest(BaseModel):
     post_id: int
     event_id: int
-    actor: str = "user"
+    actor: str = Field(default="user", max_length=200)
 
 
 class EventMergeRequest(BaseModel):
     source_event_id: int
     target_event_id: int
-    actor: str = "user"
-    note: str | None = None
+    actor: str = Field(default="user", max_length=200)
+    note: str | None = Field(default=None, max_length=2000)
 
 
 # --- Helper Function for Cursors ---
@@ -315,7 +318,10 @@ def health_ready():
             "stuck_processing": stuck_processing,
         }
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}")
+        # Generic to callers (this endpoint is unauthenticated): the real
+        # exception may carry DSN/host details. Log it for the operator.
+        print(f"\n[HEALTH ERROR] readiness probe failed: {exc}\n")
+        raise HTTPException(status_code=503, detail="database unavailable")
 
 
 @app.get("/posts/{post_id}/status")
@@ -337,35 +343,47 @@ def create_post(post: PostCreateRequest):
         with get_db_cursor() as cur:
             if post.external_post_id:
                 cur.execute(
-                    "SELECT id, deleted_at FROM posts WHERE source_id = %s AND external_post_id = %s",
-                    (post.source_id, post.external_post_id)
+                    """INSERT INTO posts
+                    (user_id, content, has_media, platform, source_id, external_post_id,
+                     external_author_id, published_at, assignment_status, content_sig)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                    ON CONFLICT (source_id, external_post_id) WHERE external_post_id IS NOT NULL
+                    DO UPDATE SET content = EXCLUDED.content, has_media = EXCLUDED.has_media,
+                                  content_sig = EXCLUDED.content_sig,
+                                  published_at = COALESCE(EXCLUDED.published_at, posts.published_at)
+                    WHERE posts.deleted_at IS NULL
+                    RETURNING id;""",
+                    (post.user_id, post.content, post.has_media, post.platform, post.source_id,
+                     post.external_post_id, post.external_author_id, post.published_at,
+                     content_signature(post.content))
                 )
-                existing = cur.fetchone()
-                if existing and extract_field(existing, "deleted_at", 1) is not None:
+                row = cur.fetchone()
+                post_id = extract_field(row, "id", 0)
+                if post_id is None:
+                    # The conflict matched a tombstone (deleted_at set): the
+                    # DO UPDATE ... WHERE filtered it out, so no row came back.
+                    # Fail closed - a deleted post must never be resurrected.
                     raise HTTPException(
                         status_code=409,
                         detail="This platform post was deleted and cannot be recreated"
                     )
-
-            cur.execute(
-                """INSERT INTO posts
-                (user_id, content, has_media, platform, source_id, external_post_id,
-                 external_author_id, published_at, assignment_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
-                ON CONFLICT (source_id, external_post_id) WHERE external_post_id IS NOT NULL
-                DO UPDATE SET content = EXCLUDED.content, has_media = EXCLUDED.has_media,
-                              published_at = COALESCE(EXCLUDED.published_at, posts.published_at)
-                RETURNING id;""",
-                (post.user_id, post.content, post.has_media, post.platform, post.source_id,
-                 post.external_post_id, post.external_author_id, post.published_at)
-            )
-            row = cur.fetchone()
-            post_id = extract_field(row, "id", 0)
+            else:
+                cur.execute(
+                    """INSERT INTO posts
+                    (user_id, content, has_media, platform, source_id, external_post_id,
+                     external_author_id, published_at, assignment_status, content_sig)
+                    VALUES (%s, %s, %s, %s, %s, NULL, %s, %s, 'pending', %s)
+                    RETURNING id;""",
+                    (post.user_id, post.content, post.has_media, post.platform,
+                     post.external_author_id, post.published_at, content_signature(post.content))
+                )
+                row = cur.fetchone()
+                post_id = extract_field(row, "id", 0)
     except HTTPException:
         raise
     except Exception as e:
         print(f"\n[API ERROR] Failed to create post: {e}\n")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="could not create post")
 
     try:
         queues_bounded_push_ingest_hints(post_id)
@@ -387,32 +405,41 @@ def create_posts_batch(payload: BatchPostCreateRequest):
             for post in payload.posts:
                 if post.external_post_id:
                     cur.execute(
-                        "SELECT id, deleted_at FROM posts WHERE source_id = %s AND external_post_id = %s",
-                        (post.source_id, post.external_post_id)
+                        """INSERT INTO posts
+                        (user_id, content, has_media, platform, source_id, external_post_id,
+                         external_author_id, published_at, assignment_status, content_sig)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                        ON CONFLICT (source_id, external_post_id) WHERE external_post_id IS NOT NULL
+                        DO UPDATE SET content = EXCLUDED.content, has_media = EXCLUDED.has_media,
+                                      content_sig = EXCLUDED.content_sig,
+                                      published_at = COALESCE(EXCLUDED.published_at, posts.published_at)
+                        WHERE posts.deleted_at IS NULL
+                        RETURNING id;""",
+                        (post.user_id, post.content, post.has_media, post.platform, post.source_id,
+                         post.external_post_id, post.external_author_id, post.published_at,
+                         content_signature(post.content))
                     )
-                    existing = cur.fetchone()
-                    if existing and extract_field(existing, "deleted_at", 1) is not None:
-                        continue  # Skip deleted tombstones in batch
-
-                cur.execute(
-                    """INSERT INTO posts
-                    (user_id, content, has_media, platform, source_id, external_post_id,
-                     external_author_id, published_at, assignment_status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
-                    ON CONFLICT (source_id, external_post_id) WHERE external_post_id IS NOT NULL
-                    DO UPDATE SET content = EXCLUDED.content, has_media = EXCLUDED.has_media,
-                                  published_at = COALESCE(EXCLUDED.published_at, posts.published_at)
-                    RETURNING id;""",
-                    (post.user_id, post.content, post.has_media, post.platform, post.source_id,
-                     post.external_post_id, post.external_author_id, post.published_at)
-                )
-                row = cur.fetchone()
-                pid = extract_field(row, "id", 0)
+                    row = cur.fetchone()
+                    pid = extract_field(row, "id", 0)
+                    if not pid:
+                        continue  # Tombstone conflict -> skip, never resurrect
+                else:
+                    cur.execute(
+                        """INSERT INTO posts
+                        (user_id, content, has_media, platform, source_id, external_post_id,
+                         external_author_id, published_at, assignment_status, content_sig)
+                        VALUES (%s, %s, %s, %s, %s, NULL, %s, %s, 'pending', %s)
+                        RETURNING id;""",
+                        (post.user_id, post.content, post.has_media, post.platform,
+                         post.external_author_id, post.published_at, content_signature(post.content))
+                    )
+                    row = cur.fetchone()
+                    pid = extract_field(row, "id", 0)
                 if pid:
                     created_posts.append((pid, post.content))
     except Exception as e:
         print(f"\n[API ERROR] Failed in batch post ingestion: {e}\n")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="could not create posts")
 
     try:
         if created_posts:
@@ -426,34 +453,74 @@ def create_posts_batch(payload: BatchPostCreateRequest):
 @app.delete("/posts/{post_id}")
 def delete_post(post_id: int):
     with get_db_cursor() as cur:
-        cur.execute("SELECT event_id FROM posts WHERE id = %s;", (post_id,))
-        prior = cur.fetchone()
-        if not prior:
-            raise HTTPException(status_code=404, detail="Post not found")
-        old_event = extract_field(prior, "event_id", 0)
-
+        # One statement: lock the post, tombstone it, and decrement its
+        # *pre-update* hub - RETURNING yields post-update values, so the old
+        # event_id must be captured by a FOR UPDATE read before the UPDATE.
+        # A delete racing with a confirm/assignment can therefore never
+        # double-decrement or leave a stale hub balance, and a re-delete sees
+        # event_id already NULL and decrements nothing.
         cur.execute(
             """
-            UPDATE posts 
-            SET deleted_at = COALESCE(deleted_at, NOW()), assignment_status = 'noise', 
-                event_id = NULL, assignment_updated_at = NOW() 
-            WHERE id = %s RETURNING id
+            WITH prior AS (
+                SELECT id, event_id FROM posts WHERE id = %s FOR UPDATE
+            ),
+            deleted AS (
+                UPDATE posts
+                SET deleted_at = COALESCE(deleted_at, NOW()),
+                    assignment_status = 'noise',
+                    event_id = NULL,
+                    assignment_updated_at = NOW()
+                WHERE id = (SELECT id FROM prior LIMIT 1)
+                RETURNING id
+            ),
+            hub_drop AS (
+                UPDATE event_hubs h
+                SET member_count = GREATEST(h.member_count - 1, 0),
+                    last_updated_at = NOW()
+                FROM prior p, deleted d
+                WHERE h.id = p.event_id
+                  AND p.event_id IS NOT NULL
+                  AND d.id = p.id
+            )
+            SELECT p.id, p.event_id FROM prior p, deleted d WHERE d.id = p.id
             """,
             (post_id,)
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Post not found")
+        old_event = extract_field(row, "event_id", 1)
 
         if old_event is not None:
-            cur.execute(
-                "UPDATE event_hubs SET member_count = GREATEST(member_count - 1, 0), last_updated_at = NOW() WHERE id = %s;",
-                (old_event,)
-            )
             close_membership(cur, post_id)
             write_outbox(cur, "post.deleted", post_id, None, {
                 "status": "deleted", "post_id": post_id, "previous_event_id": old_event
             })
+            # Reparent surviving reposts: deleting a canonical must never leave
+            # children reposting a tombstone (which the exact-fold keeper would
+            # otherwise adopt as the body's canonical). The earliest live child
+            # is promoted to canonical in the same hub and the rest repoint to
+            # it; counts are then true from live membership.
+            from .membership import record_memberships
+            from .fold import sync_hub_counts
+            cur.execute(
+                "SELECT id FROM posts WHERE repost_of_id = %s AND deleted_at IS NULL ORDER BY id;",
+                (post_id,)
+            )
+            child_ids = [extract_val(r, "id", 0) for r in (cur.fetchall() or [])]
+            if child_ids:
+                new_canonical = int(child_ids[0])
+                cur.execute(
+                    "UPDATE posts SET repost_of_id = NULL, assignment_status = 'assigned', assignment_updated_at = NOW() WHERE id = %s;",
+                    (new_canonical,)
+                )
+                if len(child_ids) > 1:
+                    cur.execute(
+                        "UPDATE posts SET repost_of_id = %s WHERE id = ANY(%s::int[]) AND id <> %s AND deleted_at IS NULL;",
+                        (new_canonical, [int(c) for c in child_ids], new_canonical)
+                    )
+                record_memberships(cur, [(new_canonical, old_event, "member")])
+                sync_hub_counts(cur, [old_event])
         else:
             write_outbox(cur, "post.deleted", post_id, None, {"status": "deleted", "post_id": post_id})
         cur.execute("DELETE FROM unclustered_posts_buffer WHERE post_id = %s;", (post_id,))
@@ -552,12 +619,21 @@ def integration_events(limit: int = 100, after: int = 0, consumer: str = "defaul
 @app.post("/integration/events/{outbox_id}/ack")
 def acknowledge_integration_event(outbox_id: int, lease_token: str | None = None):
     with get_db_cursor() as cur:
+        # Ownership rule: an event with an ACTIVE lease (leased and
+        # lease_until in the future) may only be acked by the consumer holding
+        # its lease_token. Unleased or expired-lease events may be acked by
+        # anyone. This prevents consumers from acking events they never
+        # leased (previously any caller could ack a leased row by passing no
+        # token).
         cur.execute(
             """
             UPDATE integration_outbox
             SET delivery_status = 'delivered', delivered_at = NOW(), lease_until = NULL
             WHERE id = %s AND delivery_status IN ('pending', 'leased')
-              AND (%s IS NULL OR lease_token = %s)
+              AND (
+                    lease_until IS NULL OR lease_until <= NOW()
+                    OR (lease_until > NOW() AND lease_token = %s AND %s IS NOT NULL)
+                  )
             RETURNING id, id::text AS event_key, delivery_status
             """,
             (outbox_id, lease_token, lease_token)
@@ -565,35 +641,19 @@ def acknowledge_integration_event(outbox_id: int, lease_token: str | None = None
         row = cur.fetchone()
         if not row:
             cur.execute(
-                "SELECT id, id::text AS event_key, delivery_status FROM integration_outbox WHERE id = %s",
+                "SELECT id, id::text AS event_key, delivery_status, lease_until FROM integration_outbox WHERE id = %s",
                 (outbox_id,)
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Integration event not found")
+            if extract_field(row, "delivery_status", 2) in ("pending", "leased"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Integration event is under a lease that this consumer does not own",
+                )
 
     return row
-
-
-def resolve_canonical_hub(cur, hub_id: int) -> tuple[int, bool]:
-    """Resolve canonical hub ID following merged_into_id links.
-    
-    Returns (canonical_hub_id, was_redirected).
-    """
-    current_id = hub_id
-    redirected = False
-    for _ in range(5):
-        cur.execute("SELECT id, is_active, merged_into_id FROM event_hubs WHERE id = %s;", (current_id,))
-        row = cur.fetchone()
-        if not row:
-            break
-        is_active = extract_field(row, "is_active", 1)
-        merged_into = extract_field(row, "merged_into_id", 2)
-        if is_active or not merged_into:
-            return current_id, redirected
-        current_id = merged_into
-        redirected = True
-    return current_id, redirected
 
 
 @app.get("/hubs/{hub_id}/view")
@@ -624,24 +684,26 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         catalyst = None
         if anchor_pid:
             cur.execute(
-                "SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE id = %s;",
+                "SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE id = %s AND deleted_at IS NULL;",
                 (anchor_pid,)
             )
             catalyst = cur.fetchone()
 
         if not catalyst:
             cur.execute(
-                "SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE event_id = %s ORDER BY created_at ASC LIMIT 1;",
+                "SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE event_id = %s AND repost_of_id IS NULL AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1;",
                 (canonical_id,)
             )
             catalyst = cur.fetchone()
 
-        # 2. Fetch chronological timeline
+        # 2. Fetch chronological timeline (canonical posts only - folded reposts
+        #    are surfaced via their repost_count / unique_voices, not as
+        #    duplicate feed entries).
         cur.execute(
             """
             SELECT id, user_id, content, has_media, engagement_score, created_at
             FROM posts
-            WHERE event_id = %s AND deleted_at IS NULL
+            WHERE event_id = %s AND deleted_at IS NULL AND repost_of_id IS NULL
             ORDER BY created_at ASC, id ASC
             LIMIT %s OFFSET %s;
             """,
@@ -650,9 +712,18 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         timeline_rows = cur.fetchall() or []
         has_more = len(timeline_rows) > limit
         timeline = timeline_rows[:limit]
-        cur.execute("SELECT COUNT(*) AS total_posts FROM posts WHERE event_id = %s AND deleted_at IS NULL;", (canonical_id,))
+        cur.execute(
+            "SELECT COUNT(*) AS total_posts FROM posts WHERE event_id = %s AND deleted_at IS NULL AND repost_of_id IS NULL;",
+            (canonical_id,)
+        )
         count_row = cur.fetchone()
         total_posts = int(extract_field(count_row, "total_posts", 0) or 0)
+        cur.execute(
+            "SELECT COUNT(*) AS reposts FROM posts WHERE event_id = %s AND deleted_at IS NULL AND repost_of_id IS NOT NULL;",
+            (canonical_id,)
+        )
+        repost_row = cur.fetchone()
+        repost_count = int(extract_field(repost_row, "reposts", 0) or 0)
 
         # 3. Fetch key perspectives (top distinct viewpoints / high engagement posts)
         catalyst_id = extract_field(catalyst, "id", 0) if catalyst else -1
@@ -660,7 +731,7 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
             """
             SELECT id, user_id, content, has_media, engagement_score, created_at
             FROM posts
-            WHERE event_id = %s AND id != %s AND deleted_at IS NULL
+            WHERE event_id = %s AND id != %s AND deleted_at IS NULL AND repost_of_id IS NULL
             ORDER BY engagement_score DESC, created_at ASC
             LIMIT %s;
             """,
@@ -668,12 +739,12 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         )
         perspectives = cur.fetchall() or []
 
-        # 4. Fetch evidence media
+        # 4. Fetch evidence media (unique media posts only)
         cur.execute(
             """
             SELECT id, user_id, content, created_at
             FROM posts
-            WHERE event_id = %s AND has_media = TRUE AND deleted_at IS NULL
+            WHERE event_id = %s AND has_media = TRUE AND deleted_at IS NULL AND repost_of_id IS NULL
             ORDER BY created_at ASC, id ASC
             LIMIT %s;
             """,
@@ -681,7 +752,8 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         )
         media = cur.fetchall() or []
 
-        # 5. Count unique voices
+        # 5. Count unique voices (all members, canonical + reposts - a reshared
+        #    post from a new author is still a distinct voice).
         cur.execute(
             "SELECT COUNT(DISTINCT user_id) AS unique_voices FROM posts WHERE event_id = %s AND deleted_at IS NULL;",
             (canonical_id,)
@@ -702,6 +774,8 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
         "reference": reference,
         "metrics": {
             "total_posts": total_posts,
+            "reposts": repost_count,
+            "member_count": extract_field(hub_row, "member_count", 3),
             "unique_voices": unique_voices,
             "created_at": extract_field(hub_row, "created_at", 5),
             "last_updated_at": extract_field(hub_row, "last_updated_at", 6),
@@ -723,7 +797,7 @@ def get_hub_view(hub_id: int, limit: int = 50, offset: int = 0):
 def get_anchor_post(event_id: int):
     with get_db_cursor(commit=False) as cur:
         canonical_id, _ = resolve_canonical_hub(cur, event_id)
-        cur.execute("SELECT * FROM posts WHERE event_id = %s ORDER BY created_at ASC LIMIT 1;", (canonical_id,))
+        cur.execute("SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE event_id = %s AND repost_of_id IS NULL AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1;", (canonical_id,))
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Event hub standard anchor post not found")
@@ -735,7 +809,7 @@ def get_event_media(event_id: int):
     with get_db_cursor(commit=False) as cur:
         canonical_id, _ = resolve_canonical_hub(cur, event_id)
         cur.execute(
-            "SELECT id, content, created_at FROM posts WHERE event_id = %s AND has_media = TRUE ORDER BY created_at ASC;",
+            "SELECT id, content, created_at FROM posts WHERE event_id = %s AND has_media = TRUE AND repost_of_id IS NULL AND deleted_at IS NULL ORDER BY created_at ASC;",
             (canonical_id,)
         )
         rows = cur.fetchall()
@@ -746,7 +820,7 @@ def get_event_media(event_id: int):
 def get_event_timeline(event_id: int):
     with get_db_cursor(commit=False) as cur:
         canonical_id, _ = resolve_canonical_hub(cur, event_id)
-        cur.execute("SELECT * FROM posts WHERE event_id = %s ORDER BY created_at ASC;", (canonical_id,))
+        cur.execute("SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE event_id = %s AND repost_of_id IS NULL ORDER BY created_at ASC;", (canonical_id,))
         rows = cur.fetchall()
     return rows
 
@@ -755,6 +829,6 @@ def get_event_timeline(event_id: int):
 def get_event_top_discussion(event_id: int):
     with get_db_cursor(commit=False) as cur:
         canonical_id, _ = resolve_canonical_hub(cur, event_id)
-        cur.execute("SELECT * FROM posts WHERE event_id = %s ORDER BY engagement_score DESC;", (canonical_id,))
+        cur.execute("SELECT id, user_id, content, has_media, engagement_score, created_at FROM posts WHERE event_id = %s AND repost_of_id IS NULL ORDER BY engagement_score DESC;", (canonical_id,))
         rows = cur.fetchall()
     return rows

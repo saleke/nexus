@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS event_hubs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     member_count INT NOT NULL DEFAULT 1,
+    repost_count INT NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     status VARCHAR(20) NOT NULL DEFAULT 'active',
     discourse_type VARCHAR(50) NOT NULL DEFAULT 'event',
@@ -37,7 +38,9 @@ CREATE TABLE IF NOT EXISTS posts (
     event_id INT REFERENCES event_hubs(id) ON DELETE SET NULL,
     embedding vector(384),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    entities text[]
+    entities text[],
+    content_sig BIGINT NOT NULL DEFAULT 0,
+    repost_of_id INT REFERENCES posts(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS unclustered_posts_buffer (
@@ -80,6 +83,8 @@ WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_posts_event_engagement ON posts(event_id, engagement_score DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_assignment_status ON posts(assignment_status, assignment_updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_source_external_id ON posts(source_id, external_post_id) WHERE external_post_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_hub_sig ON posts(event_id, content_sig);
+CREATE INDEX IF NOT EXISTS idx_posts_repost_of ON posts(repost_of_id) WHERE repost_of_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_feedback_analysis ON clustering_feedback_log(feedback_type, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS model_registry (
@@ -298,3 +303,16 @@ CREATE INDEX IF NOT EXISTS idx_hubs_title_trgm
     ON event_hubs USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_hubs_handle_trgm
     ON event_hubs USING gin (handle gin_trgm_ops);
+
+-- From migrations/20260917_001 (secondary indexes): these had been drifting
+-- out of schema.sql, so a fresh bootstrap silently lost four production
+-- indexes that migration-based deploys carry. Placed after every table
+-- definition so re-applying this file remains a no-op.
+CREATE INDEX IF NOT EXISTS idx_decision_log_event
+    ON assignment_decision_log(event_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_event_user
+    ON posts(event_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_post
+    ON clustering_feedback_log(post_id);
+CREATE INDEX IF NOT EXISTS idx_buffer_created
+    ON unclustered_posts_buffer(created_at);
