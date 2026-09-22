@@ -1,8 +1,8 @@
 # Nexus
 
-> **Real-time event clustering & intelligence platform** — ingests social streams, learns dense semantic embeddings, assigns posts to evolving thematic **Event Hubs**, discovers emerging stories, and closes the loop with human feedback.
+> **Real-time event clustering & intelligence platform** , ingests social streams, learns dense semantic embeddings, assigns posts to evolving thematic **Event Hubs**, discovers emerging stories, and closes the loop with human feedback.
 
-Nexus is a high-throughput, fault-tolerant pipeline built around PostgreSQL 16 + `pgvector`, Celery + Redis, and a FastAPI gateway. Its job is to turn a noisy social stream into a curated, queryable, evolvable map of *subjects* — events, debates, products, and stories — and to hand each one to the host application as a single, self-contained link.
+Nexus is a high-throughput, fault-tolerant pipeline built around PostgreSQL 16 + `pgvector`, Celery + Redis, and a FastAPI gateway. Its job is to turn a noisy social stream into a curated, queryable, evolvable map of *subjects* , events, debates, products, and stories , and to hand each one to the host application as a single, self-contained link.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Nexus is a high-throughput, fault-tolerant pipeline built around PostgreSQL 16 +
 
 Nexus is intentionally selective. It retains posts that contribute to a meaningful subject and treats casual chatter, diary-style updates, and other low-information content as **noise**.
 
-For every coherent subject it maintains an **Event Hub** — the canonical destination for a story or debate. The host application does not need to invent a headline, write a summary, or assemble related posts:
+For every coherent subject it maintains an **Event Hub** , the canonical destination for a story or debate. The host application does not need to invent a headline, write a summary, or assemble related posts:
 
 1. A post is ingested and assigned to (or births) an Event Hub.
 2. The outbox emits a `post.assigned` event carrying the hub reference.
@@ -109,14 +109,14 @@ flowchart TD
 
 ## Key Features
 
-- **High-throughput ingestion** — single-post `POST /posts` and bounded batch `POST /posts/batch` (max 500) with vectorized transformer inference and L2-normalized embeddings.
-- **Incremental, bounded centroids** — centroid arithmetic is O(1) with a rolling window (`CENTROID_MAX_MEMBERS=150`), so viral events re-anchor without a full-table `AVG(embedding)` and without semantic fossilization.
-- **Drift-proof event discovery** — buffered posts are partitioned into temporal slices, matched against active hubs, and clustered with vectorized top-k temporal graphs plus Louvain community detection.
-- **Transactional outbox with DLQ** — `FOR UPDATE SKIP LOCKED` lease locking, consumer acknowledgment, automatic dead-lettering after `OUTBOX_MAX_ATTEMPTS`, and TTL-based garbage collection.
-- **Self-healing concurrency** — atomic compare-and-swap claiming plus a reconciliation sweeper removes orphaned "zombie" posts; claim transactions drop `synchronous_commit` safely.
-- **Human-in-the-loop learning** — every unlink/confirm decision is logged with the policy/model version in effect, rolled up, and replayed into daily threshold autotuning and monthly LoRA fine-tuning.
-- **Entity-aware conflict resolution** — hub merges require similarity plus shared identity evidence; dominant-ORG board splits (e.g. Tesla vs SpaceX) are never force-merged.
-- **Structured JSON logging** — API, worker, and beat emit one JSON object per line, with HTTP access lines carrying `path`/`status_code`.
+- **High-throughput ingestion** , single-post `POST /posts` and bounded batch `POST /posts/batch` (max 500) with vectorized transformer inference and L2-normalized embeddings.
+- **Incremental, bounded centroids** , centroid arithmetic is O(1) with a rolling window (`CENTROID_MAX_MEMBERS=150`), so viral events re-anchor without a full-table `AVG(embedding)` and without semantic fossilization.
+- **Drift-proof event discovery** , buffered posts are partitioned into temporal slices, matched against active hubs, and clustered with vectorized top-k temporal graphs plus Louvain community detection.
+- **Transactional outbox with DLQ** , `FOR UPDATE SKIP LOCKED` lease locking, consumer acknowledgment, automatic dead-lettering after `OUTBOX_MAX_ATTEMPTS`, and TTL-based garbage collection.
+- **Self-healing concurrency** , atomic compare-and-swap claiming plus a reconciliation sweeper removes orphaned "zombie" posts; claim transactions drop `synchronous_commit` safely.
+- **Human-in-the-loop learning** , every unlink/confirm decision is logged with the policy/model version in effect, rolled up, and replayed into daily threshold autotuning and monthly LoRA fine-tuning.
+- **Entity-aware conflict resolution** , hub merges require similarity plus shared identity evidence; dominant-ORG board splits (e.g. Tesla vs SpaceX) are never force-merged.
+- **Structured JSON logging** , API, worker, and beat emit one JSON object per line, with HTTP access lines carrying `path`/`status_code`.
 
 ---
 
@@ -154,10 +154,10 @@ Security is a first-class concern: a platform that curates the feed is a high-va
 
 - **Passwords** are salted **PBKDF2-SHA256 with 200k iterations** (`hash_password`/`verify_password`).
 - **TOTP** is RFC 6238 (SHA-1, 6 digits, 30 s step) verified with a ±1-step window for Google-Authenticator compatibility.
-- **Sessions** are short-lived JWTs signed by a secret persisted in `system_config` (survives restarts). Every request **re-checks the account's `is_active` flag against the database**, so disabling or deleting an admin kills their session immediately — nothing outlives its revocation.
-- **Login throttling** — failed attempts are counted per account *and* per client IP over a sliding window (Redis-backed, in-process fallback), enforced by `ratelimit.py`.
-- **TOTP at login** — once a second factor is enrolled it is *required* for every sign-in, with a separate rate-limit bucket that cannot be used to lock out the account.
-- **Re-authentication for sensitive changes** — changing the password or username, and (re-)enrolling TOTP, requires the *current* password, plus a valid authenticator code when TOTP is enabled. A hijacked session cannot silently swap in an attacker-controlled secret.
+- **Sessions** are short-lived JWTs signed by a secret persisted in `system_config` (survives restarts). Every request **re-checks the account's `is_active` flag against the database**, so disabling or deleting an admin kills their session immediately , nothing outlives its revocation.
+- **Login throttling** , failed attempts are counted per account *and* per client IP over a sliding window (Redis-backed, in-process fallback), enforced by `ratelimit.py`.
+- **TOTP at login** , once a second factor is enrolled it is *required* for every sign-in, with a separate rate-limit bucket that cannot be used to lock out the account.
+- **Re-authentication for sensitive changes** , changing the password or username, and (re-)enrolling TOTP, requires the *current* password, plus a valid authenticator code when TOTP is enabled. A hijacked session cannot silently swap in an attacker-controlled secret.
 - **Google OAuth** validates the returned identity token's `aud` and `iss` claims and enforces `email_verified`.
 
 ### Fail-closed production mode
@@ -167,9 +167,9 @@ Security is a first-class concern: a platform that curates the feed is a high-va
 
 ### Application-layer defenses
 
-- **CSRF** — in production, state-changing `/admin` requests authorized by a browser session must carry a matching `Origin` (same host as `Host`, or a `TRUSTED_ORIGINS` entry). Cross-site form posts without an Origin are rejected with 403.
+- **CSRF** , in production, state-changing `/admin` requests authorized by a browser session must carry a matching `Origin` (same host as `Host`, or a `TRUSTED_ORIGINS` entry). Cross-site form posts without an Origin are rejected with 403.
 - **Security headers** on every response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` (plus `frame-ancestors 'none'` via CSP), `Referrer-Policy: no-referrer`, `Strict-Transport-Security` (production), and a `Content-Security-Policy` that allows only self-hosted assets + the pinned three.js CDN with **SRI**.
-- **Host validation** — `TRUSTED_HOSTS` (comma-separated) is enforced by Starlette's TrustedHostMiddleware when set, so a crafted `Host` header cannot poison redirects or Origin decisions.
+- **Host validation** , `TRUSTED_HOSTS` (comma-separated) is enforced by Starlette's TrustedHostMiddleware when set, so a crafted `Host` header cannot poison redirects or Origin decisions.
 - **Invite links are never logged.** The self-service invite URL is returned in the HTTP response only; it is not written to any file or structured log.
 - **All SQL is parameterized**; dynamic `WHERE` builders in admin/audit views are whitelist-only f-string composition over fixed column maps.
 - **Jinja2 autoescaping** is on, and templates never use `|safe`/`Markup`/`eval`.
@@ -219,19 +219,19 @@ docker compose up --build -d
 
 Starts, in dependency order:
 
-1. `postgres` — pgvector PostgreSQL 16 (`127.0.0.1:5432`)
-2. `redis` — Redis 7 (`127.0.0.1:6379`)
-3. `migrate` — applies the versioned schema (baseline `schema.sql` + `migrations/`), then exits
-4. `api` — FastAPI gateway on `http://localhost:8000`
-5. `worker` — Celery ingestion/assignment workers
-6. `beat` — Celery beat scheduler (persistent schedule in the `beat_data` volume)
+1. `postgres` , pgvector PostgreSQL 16 (`127.0.0.1:5432`)
+2. `redis` , Redis 7 (`127.0.0.1:6379`)
+3. `migrate` , applies the versioned schema (baseline `schema.sql` + `migrations/`), then exits
+4. `api` , FastAPI gateway on `http://localhost:8000`
+5. `worker` , Celery ingestion/assignment workers
+6. `beat` , Celery beat scheduler (persistent schedule in the `beat_data` volume)
 
 ```bash
 docker compose ps
 curl http://localhost:8000/health/live
 ```
 
-The control plane is at `http://localhost:8000/admin`. On first boot no owner exists — the login page offers to **create the owner account**.
+The control plane is at `http://localhost:8000/admin`. On first boot no owner exists , the login page offers to **create the owner account**.
 
 ### Local manual setup
 
@@ -264,7 +264,7 @@ python -m post_clustering_pipeline
 uvicorn post_clustering_pipeline.api:app --host 0.0.0.0 --port 8000
 ```
 
-Swagger docs: `http://localhost:8000/docs`. In local development without `API_AUTH_TOKEN`, auth is **dev-open**; the API is intentionally open so the loop works out of the box. Set `NEXUS_ENV=production` (and a token) to flip to fail-closed — see [Security](#security) and [Production Hardening](#production-hardening-checklist).
+Swagger docs: `http://localhost:8000/docs`. In local development without `API_AUTH_TOKEN`, auth is **dev-open**; the API is intentionally open so the loop works out of the box. Set `NEXUS_ENV=production` (and a token) to flip to fail-closed , see [Security](#security) and [Production Hardening](#production-hardening-checklist).
 
 ---
 
@@ -351,7 +351,7 @@ All data-plane endpoints honor `Authorization: Bearer <consumer token>` (or the 
 
 ### 1. Ingestion
 
-#### `POST /posts` — single post
+#### `POST /posts` , single post
 
 ```bash
 curl -X POST http://localhost:8000/posts \
@@ -371,7 +371,7 @@ curl -X POST http://localhost:8000/posts \
 { "status": "queued", "post_id": 1 }
 ```
 
-#### `POST /posts/batch` — bulk ingestion (max 500)
+#### `POST /posts/batch` , bulk ingestion (max 500)
 
 ```json
 {
@@ -454,17 +454,17 @@ python -m post_clustering_pipeline.jobs.promote_model embedding-v2 ./models/cand
 python -m post_clustering_pipeline.tools.inspect_model
 ```
 
-All CLI/job entry points read `DATABASE_URL` from the environment — export it explicitly when running standalone.
+All CLI/job entry points read `DATABASE_URL` from the environment , export it explicitly when running standalone.
 
 ### The intelligence loop (how the system learns)
 
 The system learns from operators, not from itself. Automatic decisions are never used as training signal; only explicit human corrections are:
 
-1. **Journal** — every automatic assignment is appended to `assignment_decision_log` with the similarity used and the `policy_version`/`model_version` in effect.
-2. **Human labels** — `POST /posts/confirm`, `POST /posts/unlink`, and the panel's quality desk write `clustering_feedback_log` rows typed `user_confirmed` / `user_removed`, tagged with the versions in effect and the acting identity. System bookkeeping writes (`auto_confirmed`, `system_auto_merge`) are stored but never graded.
-3. **Rollup** — `run_quality_rollup_scheduled` (5 min) aggregates each anchored hour into `feedback_rollups`: human rows carry `precision` (confirmed / graded), `unlink_rate`, and a **drift index** (mean similarity of confirmed vs removed margins); system rows carry `coverage` (assigned share). One `'live'` partial row covers the current (open) hour so the metrics panel can tell "idle" from "stalled".
-4. **Autotune** — `run_threshold_autotune_scheduled` (daily) replays the last `TUNE_WINDOW_DAYS` of labels against the journal, scans the full precision/coverage curve (precision is non-monotone, so no first-fit scan), and — only when there are at least `MIN_FEEDBACK_SAMPLES` labels — files a **proposal** in `policy_history`. Proposals carry an impact estimate (posts that would flip) and knob warnings; an operator applies them through the calibration panel or API. `AUTO_APPLY_THRESHOLD=true` would switch to auto-apply; the default is propose-only.
-5. **Model learning** — `jobs.monthly_learner` (on demand) fine-tunes the LoRA adapter from confirmed positives and removed hard negatives (triplet margin loss), scores a 20% holdout under the *same* pairwise metric as the base model, and only promotes via `jobs.promote_model` if the candidate clears the precision gate and does not regress vs the active model. Promotion writes `model_registry` and the next `policy_version`/`model_version` stamp reflects it.
+1. **Journal** , every automatic assignment is appended to `assignment_decision_log` with the similarity used and the `policy_version`/`model_version` in effect.
+2. **Human labels** , `POST /posts/confirm`, `POST /posts/unlink`, and the panel's quality desk write `clustering_feedback_log` rows typed `user_confirmed` / `user_removed`, tagged with the versions in effect and the acting identity. System bookkeeping writes (`auto_confirmed`, `system_auto_merge`) are stored but never graded.
+3. **Rollup** , `run_quality_rollup_scheduled` (5 min) aggregates each anchored hour into `feedback_rollups`: human rows carry `precision` (confirmed / graded), `unlink_rate`, and a **drift index** (mean similarity of confirmed vs removed margins); system rows carry `coverage` (assigned share). One `'live'` partial row covers the current (open) hour so the metrics panel can tell "idle" from "stalled".
+4. **Autotune** , `run_threshold_autotune_scheduled` (daily) replays the last `TUNE_WINDOW_DAYS` of labels against the journal, scans the full precision/coverage curve (precision is non-monotone, so no first-fit scan), and , only when there are at least `MIN_FEEDBACK_SAMPLES` labels , files a **proposal** in `policy_history`. Proposals carry an impact estimate (posts that would flip) and knob warnings; an operator applies them through the calibration panel or API. `AUTO_APPLY_THRESHOLD=true` would switch to auto-apply; the default is propose-only.
+5. **Model learning** , `jobs.monthly_learner` (on demand) fine-tunes the LoRA adapter from confirmed positives and removed hard negatives (triplet margin loss), scores a 20% holdout under the *same* pairwise metric as the base model, and only promotes via `jobs.promote_model` if the candidate clears the precision gate and does not regress vs the active model. Promotion writes `model_registry` and the next `policy_version`/`model_version` stamp reflects it.
 
 Every mutation is versioned, explainable, and reversible (`policy_history`, `model_registry` with `retired`/`promoted` statuses).
 
@@ -476,7 +476,7 @@ Every mutation is versioned, explainable, and reversible (`policy_history`, `mod
 pytest tests/ -v            # NLP, embeddings, freezing, centroids, slicing, clustering, intelligence rollups
 ```
 
-The unit/behavior suite targets non-DB logic (including `test_quality_rollup.py`, which locks in the human-rollup ordering guarantee: the drift estimator must not consume the aggregate result set on a shared cursor). `tests/runtime/*` exercise a live stack (they write to a real database) and are excluded from the default run — point them at a scratch DB via `DATABASE_URL`.
+The unit/behavior suite targets non-DB logic (including `test_quality_rollup.py`, which locks in the human-rollup ordering guarantee: the drift estimator must not consume the aggregate result set on a shared cursor). `tests/runtime/*` exercise a live stack (they write to a real database) and are excluded from the default run , point them at a scratch DB via `DATABASE_URL`.
 
 End-to-end simulation:
 
@@ -484,7 +484,7 @@ End-to-end simulation:
 python -m post_clustering_pipeline.evaluation.simulate_full_pipeline
 ```
 
-`tests/runtime/test_clustering_stress.py` runs a deterministic corpus through the live stack by default with beat off, then runs its own audit — the canonical regression gate before any threshold/policy change.
+`tests/runtime/test_clustering_stress.py` runs a deterministic corpus through the live stack by default with beat off, then runs its own audit , the canonical regression gate before any threshold/policy change.
 
 ---
 
